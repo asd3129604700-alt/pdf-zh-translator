@@ -6,6 +6,7 @@
   const els = {
     dropzone: $("#dropzone"),
     fileInput: $("#file-input"),
+    fileList: $("#file-list"),
     optLang: $("#opt-lang"),
     optService: $("#opt-service"),
     optCover: $("#opt-cover"),
@@ -34,10 +35,12 @@
     textCount: $("#text-count"),
   };
 
+  const IMAGE_RE = /\.(png|jpe?g|webp|bmp|gif)$/i;
+  const PDF_RE = /\.pdf$/i;
+
   const state = {
-    pdfDoc: null,
-    file: null,
-    pages: [], // { original: canvas, translated: canvas, lines, map }
+    files: [],
+    pages: [],
     pageIndex: 0,
     showOriginal: false,
     fileName: "translated-zh.pdf",
@@ -72,13 +75,58 @@
   }
 
   function resetAll() {
-    state.pdfDoc = null;
-    state.file = null;
+    state.files = [];
     state.pages = [];
     state.pageIndex = 0;
     state.showOriginal = false;
     els.fileInput.value = "";
+    updateFileList();
     showPanel("upload");
+  }
+
+  function classifyFiles(fileList) {
+    const files = Array.from(fileList || []);
+    const images = [];
+    const pdfs = [];
+    const other = [];
+    files.forEach((f) => {
+      const name = f.name || "";
+      if (PDF_RE.test(name) || f.type === "application/pdf") pdfs.push(f);
+      else if (IMAGE_RE.test(name) || (f.type || "").startsWith("image/")) images.push(f);
+      else other.push(f);
+    });
+    return { images: images, pdfs: pdfs, other: other };
+  }
+
+  function updateFileList() {
+    const files = state.files;
+    if (!files.length) {
+      els.fileList.classList.add("hidden");
+      els.fileList.textContent = "";
+      return;
+    }
+    const names = files.map((f, i) => i + 1 + ". " + f.name).join("　");
+    els.fileList.classList.remove("hidden");
+    els.fileList.textContent =
+      "已选 " + files.length + " 个文件：" + names;
+  }
+
+  function acceptFiles(fileList) {
+    const { images, pdfs, other } = classifyFiles(fileList);
+    if (other.length && !images.length && !pdfs.length) {
+      fail("仅支持 PDF 或 JPG / PNG / WebP 等图片。");
+      return;
+    }
+    if (pdfs.length > 1) {
+      fail("一次只能处理 1 个 PDF。图片可以多选；若同时选了 PDF 与图片，将先处理 PDF 再处理图片。");
+      return;
+    }
+    const merged = pdfs.concat(images);
+    if (!merged.length) return;
+    state.files = merged;
+    updateFileList();
+    // Auto-start when files are chosen
+    handleFiles(state.files);
   }
 
   function renderPreview() {
@@ -121,10 +169,10 @@
       }
       item.appendChild(srcP);
       item.appendChild(dstP);
-      item.addEventListener("click", () => {
-        els.textList
-          .querySelectorAll(".text-item")
-          .forEach((el) => el.classList.remove("active"));
+      item.addEventListener("click", function () {
+        els.textList.querySelectorAll(".text-item").forEach(function (el) {
+          el.classList.remove("active");
+        });
         item.classList.add("active");
       });
       frag.appendChild(item);
@@ -132,127 +180,230 @@
     els.textList.appendChild(frag);
   }
 
-  async function handleFile(file) {
-    if (!file) return;
-    if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
-      fail("请选择 PDF 文件。当前文件：" + (file.name || file.type || "未知"));
-      return;
+  async function processPdfFile(file, options, cover) {
+    const buffer = await file.arrayBuffer();
+    const pdfDoc = await PdfEngine.loadDocument(buffer);
+    const numPages = pdfDoc.numPages;
+    const extracts = [];
+    for (let i = 1; i <= numPages; i++) {
+      const page = await pdfDoc.getPage(i);
+      const extracted = await PdfEngine.extractPage(page, 1);
+      extracts.push(extracted);
     }
+    const allTexts = [];
+    extracts.forEach(function (ex) {
+      ex.lines.forEach(function (line) {
+        allTexts.push(line.text);
+      });
+    });
+    if (!allTexts.length) {
+      return {
+        pages: [],
+        empty: true,
+        label: file.name,
+      };
+    }
+    const translated = await PdfTranslator.translateMany(allTexts, options);
+    let cursor = 0;
+    const pages = [];
+    for (let i = 0; i < extracts.length; i++) {
+      const ex = extracts[i];
+      const map = {};
+      const pairs = [];
+      for (let j = 0; j < ex.lines.length; j++) {
+        const t = translated[cursor++];
+        map[ex.lines[j].text] = t.dst;
+        pairs.push({
+          src: ex.lines[j].text,
+          dst: t.dst,
+          service: t.service,
+        });
+      }
+      const original = await PdfEngine.renderPageOriginal(ex.page, 2);
+      const translatedCanvas = await PdfEngine.renderPageComposed(ex.page, {
+        scale: 2,
+        cover: cover,
+        lines: ex.lines,
+        map: map,
+      });
+      pages.push({
+        original: original,
+        translated: translatedCanvas,
+        lines: ex.lines,
+        map: map,
+        pairs: pairs,
+        label: file.name + " · 第 " + (i + 1) + " 页",
+      });
+    }
+    return { pages: pages, empty: false, label: file.name };
+  }
 
-    state.file = file;
-    state.fileName = file.name.replace(/\.pdf$/i, "") + "-中文版.pdf";
+  async function processImageFile(file, options, cover, onOcrProgress, onTranslateProgress) {
+    const loaded = await ImageEngine.loadFileToCanvas(file, 2000);
+    const original = document.createElement("canvas");
+    original.width = loaded.canvas.width;
+    original.height = loaded.canvas.height;
+    original.getContext("2d").drawImage(loaded.canvas, 0, 0);
+
+    const ocr = await ImageEngine.ocrCanvas(loaded.canvas, onOcrProgress);
+    const lines = ocr.lines || [];
+    if (!lines.length) {
+      return {
+        page: {
+          original: original,
+          translated: original,
+          lines: [],
+          map: {},
+          pairs: [],
+          label: file.name,
+        },
+        empty: true,
+        texts: [],
+      };
+    }
+    const texts = lines.map(function (l) {
+      return l.text;
+    });
+    const translated = await PdfTranslator.translateMany(texts, options, onTranslateProgress);
+    const map = {};
+    const pairs = [];
+    for (let i = 0; i < lines.length; i++) {
+      map[lines[i].text] = translated[i].dst;
+      pairs.push({
+        src: lines[i].text,
+        dst: translated[i].dst,
+        service: translated[i].service,
+      });
+    }
+    const outCanvas = ImageEngine.overlayLines(original, lines, map, {
+      cover: cover,
+    });
+    return {
+      page: {
+        original: original,
+        translated: outCanvas,
+        lines: lines,
+        map: map,
+        pairs: pairs,
+        label: file.name,
+      },
+      empty: false,
+      texts: texts,
+    };
+  }
+
+  async function handleFiles(files) {
+    if (!files || !files.length) return;
+
     showPanel("process");
     setStep("load");
-    setProgress(4, "读取文件…");
-    els.processFile.textContent = file.name;
+    setProgress(4, "准备处理 " + files.length + " 个文件…");
+    els.processFile.textContent = files.map(function (f) {
+      return f.name;
+    }).join("、");
+
+    const options = {
+      target: els.optLang.value,
+      service: els.optService.value,
+      preserveCodes: els.optPreserve.checked,
+    };
+    const cover = els.optCover.checked;
+
+    state.pages = [];
+    let totalTexts = 0;
+    let emptyCount = 0;
 
     try {
-      const buffer = await file.arrayBuffer();
-      setProgress(10, "解析 PDF…");
-      const pdfDoc = await PdfEngine.loadDocument(buffer);
-      state.pdfDoc = pdfDoc;
-
-      const options = {
-        target: els.optLang.value,
-        service: els.optService.value,
-        preserveCodes: els.optPreserve.checked,
-      };
-      const cover = els.optCover.checked;
-
-      const numPages = pdfDoc.numPages;
-      state.pages = [];
-
-      // Phase 1: extract all pages
       setStep("extract");
-      const extracts = [];
-      for (let i = 1; i <= numPages; i++) {
-        setProgress(10 + (i / numPages) * 25, "提取第 " + i + " / " + numPages + " 页文字…");
-        const page = await pdfDoc.getPage(i);
-        const extracted = await PdfEngine.extractPage(page, 1);
-        extracts.push(extracted);
-      }
-
-      const allTexts = [];
-      extracts.forEach((ex) => {
-        ex.lines.forEach((line) => allTexts.push(line.text));
+      const pdfs = files.filter(function (f) {
+        return PDF_RE.test(f.name) || f.type === "application/pdf";
+      });
+      const images = files.filter(function (f) {
+        return IMAGE_RE.test(f.name) || (f.type || "").startsWith("image/");
       });
 
-      if (!allTexts.length) {
+      // PDF first
+      for (let i = 0; i < pdfs.length; i++) {
+        setProgress(
+          8 + (i / Math.max(1, pdfs.length)) * 20,
+          "解析 PDF " + pdfs[i].name + "…"
+        );
+        const res = await processPdfFile(pdfs[i], options, cover);
+        if (res.empty) emptyCount++;
+        else {
+          state.pages = state.pages.concat(res.pages);
+          res.pages.forEach(function (p) {
+            totalTexts += (p.lines || []).length;
+          });
+        }
+      }
+
+      // Images with OCR
+      for (let i = 0; i < images.length; i++) {
+        const file = images[i];
+        const base = 28 + (i / Math.max(1, images.length)) * 40;
+        setProgress(base, "OCR 识别 " + file.name + "（第 " + (i + 1) + "/" + images.length + " 张）…");
+        const res = await processImageFile(
+          file,
+          options,
+          cover,
+          function (m) {
+            if (!m || !m.status) return;
+            const p = typeof m.progress === "number" ? m.progress : 0;
+            const label = m.status.replace(/_/g, " ");
+            setProgress(
+              base + p * 8,
+              "OCR " + file.name + "：" + label + " " + Math.round(p * 100) + "%"
+            );
+          },
+          function (done, total) {
+            setStep("translate");
+            setProgress(
+              base + 10 + (done / Math.max(1, total)) * 10,
+              "翻译 " + file.name + "：" + done + " / " + total + " 条"
+            );
+          }
+        );
+        state.pages.push(res.page);
+        if (res.empty) emptyCount++;
+        else totalTexts += res.texts.length;
+
+        // Translate progress is inside processImageFile via translateMany (no callback wired here for simplicity)
+        setProgress(
+          28 + ((i + 1) / Math.max(1, images.length)) * 40,
+          "已处理 " + (i + 1) + " / " + images.length + " 张图片"
+        );
+      }
+
+      setStep("translate");
+      setProgress(75, "翻译已完成，正在整理结果…");
+
+      setStep("compose");
+      setProgress(90, "生成预览…");
+
+      if (!state.pages.length) {
         fail(
-          "这个 PDF 没有可提取的文字层（可能是纯扫描图）。当前版本支持带文字层的 PDF；扫描件 OCR 将在后续版本加入。"
+          emptyCount
+            ? "未能从所选文件中识别出文字。图片请尽量使用清晰、对比度高的英文截图。"
+            : "没有可处理的页面。"
         );
         return;
       }
 
-      // Phase 2: translate
-      setStep("translate");
-      setProgress(40, "开始翻译 " + allTexts.length + " 条文本…");
-      const translated = await PdfTranslator.translateMany(
-        allTexts,
-        options,
-        (done, total) => {
-          const pct = 40 + (done / Math.max(1, total)) * 35;
-          setProgress(pct, "翻译 " + done + " / " + total + " 条…");
-        }
-      );
-
-      // Build per-page maps
-      let cursor = 0;
-      for (let i = 0; i < extracts.length; i++) {
-        const ex = extracts[i];
-        const map = {};
-        const pairs = [];
-        for (let j = 0; j < ex.lines.length; j++) {
-          const t = translated[cursor++];
-          map[ex.lines[j].text] = t.dst;
-          pairs.push({
-            src: ex.lines[j].text,
-            dst: t.dst,
-            service: t.service,
-            line: ex.lines[j],
-          });
-        }
-        ex.map = map;
-        ex.pairs = pairs;
-      }
-
-      // Phase 3: compose canvases
-      setStep("compose");
-      for (let i = 0; i < extracts.length; i++) {
-        setProgress(
-          75 + ((i + 1) / extracts.length) * 20,
-          "生成中文页面 " + (i + 1) + " / " + extracts.length + "…"
-        );
-        const ex = extracts[i];
-        const original = await PdfEngine.renderPageOriginal(ex.page, 2);
-        const translatedCanvas = await PdfEngine.renderPageComposed(ex.page, {
-          scale: 2,
-          cover: cover,
-          lines: ex.lines,
-          map: ex.map,
-        });
-        state.pages.push({
-          original: original,
-          translated: translatedCanvas,
-          lines: ex.lines,
-          map: ex.map,
-          pairs: ex.pairs,
-          pdfPage: ex.page,
-        });
-      }
-
       setStep("done");
-      setProgress(100, "完成。共 " + numPages + " 页。");
+      setProgress(100, "完成。共 " + state.pages.length + " 页。");
       els.resultMeta.textContent =
-        file.name +
-        " · " +
-        numPages +
+        files.length +
+        " 个文件 · " +
+        state.pages.length +
         " 页 · " +
-        allTexts.length +
+        totalTexts +
         " 条文本 · 目标 " +
-        (els.optLang.value === "zh-TW" ? "繁體中文" : "简体中文");
+        (els.optLang.value === "zh-TW" ? "繁體中文" : "简体中文") +
+        (emptyCount ? " · " + emptyCount + " 页无文字" : "");
       state.pageIndex = 0;
       state.showOriginal = false;
+      state.fileName = buildOutputName(files);
       showPanel("result");
       renderPreview();
       renderTextList(state.pages[0]);
@@ -262,62 +413,75 @@
     }
   }
 
+  function buildOutputName(files) {
+    if (files.length === 1) {
+      return files[0].name.replace(/\.[^.]+$/, "") + "-中文版.pdf";
+    }
+    return "图片PDF翻译-" + files.length + "文件-中文版.pdf";
+  }
+
   // Events
-  els.dropzone.addEventListener("click", () => els.fileInput.click());
-  els.dropzone.addEventListener("keydown", (e) => {
+  els.dropzone.addEventListener("click", function () {
+    els.fileInput.click();
+  });
+  els.dropzone.addEventListener("keydown", function (e) {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
       els.fileInput.click();
     }
   });
-  els.fileInput.addEventListener("change", (e) => {
-    const file = e.target.files && e.target.files[0];
-    handleFile(file);
+  els.fileInput.addEventListener("change", function (e) {
+    acceptFiles(e.target.files);
+    // allow re-selecting the same file later
+    e.target.value = "";
   });
 
-  ["dragenter", "dragover"].forEach((name) => {
-    els.dropzone.addEventListener(name, (e) => {
+  ["dragenter", "dragover"].forEach(function (name) {
+    els.dropzone.addEventListener(name, function (e) {
       e.preventDefault();
       e.stopPropagation();
       els.dropzone.classList.add("dragover");
     });
   });
-  ["dragleave", "drop"].forEach((name) => {
-    els.dropzone.addEventListener(name, (e) => {
+  ["dragleave", "drop"].forEach(function (name) {
+    els.dropzone.addEventListener(name, function (e) {
       e.preventDefault();
       e.stopPropagation();
       els.dropzone.classList.remove("dragover");
     });
   });
-  els.dropzone.addEventListener("drop", (e) => {
-    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-    handleFile(file);
+  els.dropzone.addEventListener("drop", function (e) {
+    if (e.dataTransfer && e.dataTransfer.files) {
+      acceptFiles(e.dataTransfer.files);
+    }
   });
 
-  els.btnPrev.addEventListener("click", () => {
+  els.btnPrev.addEventListener("click", function () {
     if (state.pageIndex > 0) {
       state.pageIndex -= 1;
       renderPreview();
       renderTextList(state.pages[state.pageIndex]);
     }
   });
-  els.btnNext.addEventListener("click", () => {
+  els.btnNext.addEventListener("click", function () {
     if (state.pageIndex < state.pages.length - 1) {
       state.pageIndex += 1;
       renderPreview();
       renderTextList(state.pages[state.pageIndex]);
     }
   });
-  els.btnToggle.addEventListener("click", () => {
+  els.btnToggle.addEventListener("click", function () {
     state.showOriginal = !state.showOriginal;
     renderPreview();
   });
   els.btnReset.addEventListener("click", resetAll);
   els.btnErrorReset.addEventListener("click", resetAll);
 
-  els.btnDownload.addEventListener("click", () => {
+  els.btnDownload.addEventListener("click", function () {
     try {
-      const canvases = state.pages.map((p) => p.translated);
+      const canvases = state.pages.map(function (p) {
+        return p.translated;
+      });
       const pdf = PdfEngine.canvasesToPdf(canvases);
       PdfEngine.downloadPdf(pdf, state.fileName || "translated-zh.pdf");
     } catch (err) {
@@ -325,6 +489,5 @@
     }
   });
 
-  // Init
   showPanel("upload");
 })();

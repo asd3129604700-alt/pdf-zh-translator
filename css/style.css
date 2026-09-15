@@ -153,6 +153,18 @@ html, body {
   font-size: 0.92rem;
 }
 
+.file-list {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  font-size: 0.84rem;
+  line-height: 1.45;
+  word-break: break-all;
+  text-align: left;
+}
+
 .options {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
