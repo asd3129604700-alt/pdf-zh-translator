@@ -64,6 +64,13 @@
               <option value="dict">仅提取对照（不调 API）</option>
             </select>
           </label>
+          <label class="field">
+            <span>图片模式</span>
+            <select id="opt-image-mode">
+              <option value="ocr" selected>本地 OCR（快速）</option>
+              <option value="gemini">Gemini 视觉（高质量）</option>
+            </select>
+          </label>
           <label class="field checkbox">
             <input type="checkbox" id="opt-cover" checked />
             <span>覆盖原文后再写中文</span>
@@ -72,7 +79,14 @@
             <input type="checkbox" id="opt-preserve-codes" checked />
             <span>保留 PMS/色号/数字代码</span>
           </label>
+          <label class="field">
+            <span>Gemini API Key（高质量图片必填）</span>
+            <input id="opt-gemini-key" type="password" placeholder="AIza..." autocomplete="off" />
+          </label>
         </div>
+        <p class="hint">
+          复杂规格图 / 彩色标注建议用「Gemini 视觉」。密钥仅保存在本机浏览器，不会上传到本站服务器。
+        </p>
       </section>
 
       <!-- Processing -->

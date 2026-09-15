@@ -11,6 +11,8 @@
     optService: $("#opt-service"),
     optCover: $("#opt-cover"),
     optPreserve: $("#opt-preserve-codes"),
+    optImageMode: $("#opt-image-mode"),
+    optGeminiKey: $("#opt-gemini-key"),
     panelUpload: $("#panel-upload"),
     panelProcess: $("#panel-process"),
     panelResult: $("#panel-result"),
@@ -239,14 +241,43 @@
   }
 
   async function processImageFile(file, options, cover, onOcrProgress, onTranslateProgress) {
-    const loaded = await ImageEngine.loadFileToCanvas(file, 2000);
+    const loaded = await ImageEngine.loadFileToCanvas(file, 2200);
     const original = document.createElement("canvas");
     original.width = loaded.canvas.width;
     original.height = loaded.canvas.height;
     original.getContext("2d").drawImage(loaded.canvas, 0, 0);
 
-    const ocr = await ImageEngine.ocrCanvas(loaded.canvas, onOcrProgress);
-    const lines = ocr.lines || [];
+    let lines = null;
+    let pretranslated = false;
+
+    const imageMode = (els.optImageMode && els.optImageMode.value) || "ocr";
+    const geminiKey =
+      (els.optGeminiKey && els.optGeminiKey.value || "").trim();
+
+    if (imageMode === "gemini" && geminiKey) {
+      if (onOcrProgress) onOcrProgress({ status: "gemini_vision", progress: 0.2 });
+      try {
+        lines = await ImageEngine.geminiExtractLines(
+          original,
+          options.target || "zh-CN",
+          geminiKey
+        );
+        pretranslated = true;
+      } catch (err) {
+        console.warn("Gemini failed, falling back to OCR:", err);
+        if (onOcrProgress)
+          onOcrProgress({ status: "gemini_failed_use_ocr", progress: 0.3 });
+        lines = null;
+        pretranslated = false;
+      }
+    }
+
+    if (!lines || !lines.length) {
+      const ocr = await ImageEngine.ocrCanvas(loaded.canvas, onOcrProgress);
+      lines = ocr.lines || [];
+      pretranslated = false;
+    }
+
     if (!lines.length) {
       return {
         page: {
@@ -261,20 +292,51 @@
         texts: [],
       };
     }
+
     const texts = lines.map(function (l) {
       return l.text;
     });
-    const translated = await PdfTranslator.translateMany(texts, options, onTranslateProgress);
     const map = {};
     const pairs = [];
-    for (let i = 0; i < lines.length; i++) {
-      map[lines[i].text] = translated[i].dst;
-      pairs.push({
-        src: lines[i].text,
-        dst: translated[i].dst,
-        service: translated[i].service,
-      });
+
+    if (pretranslated) {
+      // Gemini already returned translations
+      for (let i = 0; i < lines.length; i++) {
+        const dst = lines[i].translation || lines[i].text;
+        map[lines[i].text] = dst;
+        pairs.push({
+          src: lines[i].text,
+          dst: dst,
+          service: "gemini",
+        });
+      }
+    } else {
+      const translated = await PdfTranslator.translateMany(
+        texts,
+        options,
+        onTranslateProgress
+      );
+      for (let i = 0; i < lines.length; i++) {
+        let dst = translated[i].dst;
+        if (window.ImageEngine && ImageEngine.applyLocalGlossary) {
+          const glossed = ImageEngine.applyLocalGlossary(lines[i].text);
+          // Only trust glossary when it fully covers the phrase (little English left)
+          if (glossed !== lines[i].text) {
+            const leftover = (glossed.match(/[A-Za-z]{3,}/g) || []).filter(function (w) {
+              return !/^(please|use|sku|inch|color|and|for|the|with|from|under|years)$/i.test(w);
+            });
+            if (leftover.length === 0) dst = glossed;
+          }
+        }
+        map[lines[i].text] = dst;
+        pairs.push({
+          src: lines[i].text,
+          dst: dst,
+          service: translated[i].service,
+        });
+      }
     }
+
     const outCanvas = ImageEngine.overlayLines(original, lines, map, {
       cover: cover,
     });
@@ -488,6 +550,29 @@
       alert("导出失败：" + (err && err.message ? err.message : err));
     }
   });
+
+  // Persist image-mode prefs locally
+  try {
+    const savedKey = localStorage.getItem("pdfzh_gemini_key") || "";
+    const savedMode = localStorage.getItem("pdfzh_image_mode") || "ocr";
+    if (els.optGeminiKey && savedKey) els.optGeminiKey.value = savedKey;
+    if (els.optImageMode && savedMode) els.optImageMode.value = savedMode;
+  } catch (e) { /* private mode */ }
+
+  if (els.optGeminiKey) {
+    els.optGeminiKey.addEventListener("change", function () {
+      try {
+        localStorage.setItem("pdfzh_gemini_key", els.optGeminiKey.value.trim());
+      } catch (e) { /* ignore */ }
+    });
+  }
+  if (els.optImageMode) {
+    els.optImageMode.addEventListener("change", function () {
+      try {
+        localStorage.setItem("pdfzh_image_mode", els.optImageMode.value);
+      } catch (e) { /* ignore */ }
+    });
+  }
 
   showPanel("upload");
 })();
