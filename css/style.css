@@ -165,6 +165,40 @@ html, body {
   text-align: left;
 }
 
+.api-panel {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  background: #fbfaf7;
+}
+.api-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.api-panel-head h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+.api-badge {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: #fff;
+}
+.api-panel .field {
+  margin-top: 8px;
+  max-width: 480px;
+}
+.api-panel a {
+  color: var(--accent-deep);
+}
+
 .options {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

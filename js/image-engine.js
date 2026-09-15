@@ -41,7 +41,7 @@
   }
 
   function loadFileToCanvas(file, maxSide) {
-    maxSide = maxSide || 2200;
+    maxSide = maxSide || 2800;
     return new Promise(function (resolve, reject) {
       const url = URL.createObjectURL(file);
       const img = new Image();
@@ -49,9 +49,11 @@
         URL.revokeObjectURL(url);
         let w = img.naturalWidth;
         let h = img.naturalHeight;
-        // Upscale small images a bit for OCR
         let scale = Math.min(1, maxSide / Math.max(w, h));
-        if (Math.max(w, h) < 900) scale = Math.min(2, (1200 / Math.max(w, h)));
+        // Aggressively upscale small/low-res sources so tiny labels become readable
+        const long = Math.max(w, h);
+        if (long < 1000) scale = Math.min(3, 2200 / long);
+        else if (long < 1600) scale = Math.min(2, 2400 / long);
         w = Math.max(1, Math.round(w * scale));
         h = Math.max(1, Math.round(h * scale));
         const canvas = document.createElement("canvas");
@@ -61,7 +63,7 @@
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = "high";
         ctx.drawImage(img, 0, 0, w, h);
-        resolve({ canvas: canvas, width: w, height: h, file: file });
+        resolve({ canvas: canvas, width: w, height: h, file: file, scale: scale });
       };
       img.onerror = function () {
         URL.revokeObjectURL(url);
@@ -69,6 +71,17 @@
       };
       img.src = url;
     });
+  }
+
+  function upscaleCanvas(source, factor) {
+    const c = document.createElement("canvas");
+    c.width = Math.round(source.width * factor);
+    c.height = Math.round(source.height * factor);
+    const ctx = c.getContext("2d", { willReadFrequently: true });
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(source, 0, 0, c.width, c.height);
+    return c;
   }
 
   /** Grayscale + contrast boost copy for OCR (keeps original canvas for overlay). */
@@ -80,23 +93,29 @@
     ctx.drawImage(source, 0, 0);
     const img = ctx.getImageData(0, 0, c.width, c.height);
     const d = img.data;
-    // First pass: luminance
+    // Luminance histogram
     const lum = new Float32Array(d.length / 4);
     for (let i = 0, p = 0; i < d.length; i += 4, p++) {
       lum[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
     }
-    // Percentile stretch
     const sorted = Array.from(lum).sort(function (a, b) {
       return a - b;
     });
-    const lo = sorted[Math.floor(sorted.length * 0.05)] || 0;
-    const hi = sorted[Math.floor(sorted.length * 0.95)] || 255;
+    // Use aggressive low percentile so sparse dark text is captured
+    let lo = sorted[Math.floor(sorted.length * 0.005)] || 0;
+    let hi = sorted[Math.floor(sorted.length * 0.995)] || 255;
+    // White-page documents: 0.5% dark text still leaves lo near 255 — fall back
+    if (hi - lo < 24) {
+      lo = 0;
+      hi = 255;
+    }
+    // If background is near-white, stretch from 0 so ink stays dark
+    if (lo > 180) lo = 0;
+    if (hi < 80) hi = 255;
     const range = Math.max(1, hi - lo);
     for (let i = 0, p = 0; i < d.length; i += 4, p++) {
       let v = ((lum[p] - lo) / range) * 255;
       v = v < 0 ? 0 : v > 255 ? 255 : v;
-      // S-curve to push midtones apart
-      v = 255 * (v / 255) * (v / 255) * (3 - 2 * (v / 255));
       d[i] = d[i + 1] = d[i + 2] = v;
     }
     ctx.putImageData(img, 0, 0);
@@ -338,15 +357,9 @@
     return lines;
   }
 
-  async function ocrCanvas(canvas, onProgress) {
-    const worker = await getWorker(onProgress);
-    const ocrInput = makeOcrCanvas(canvas);
-    const result = await worker.recognize(ocrInput);
-    const data = result && result.data;
+  function extractLinesFromResult(data, pageW, pageH, confMin) {
+    const pageArea = pageW * pageH;
     const words = (data && data.words) || [];
-
-    // Attach page area for garbage box filter
-    const pageArea = canvas.width * canvas.height;
     for (let i = 0; i < words.length; i++) words[i]._pageArea = pageArea;
 
     let lines = [];
@@ -359,14 +372,18 @@
         const w = Math.max(1, (b.x1 || 0) - (b.x0 || 0));
         const h = Math.max(1, (b.y1 || 0) - (b.y0 || 0));
         if (!text || text.length < 2) continue;
-        if (conf < 55 || looksLikeGarbage(text) || !isMostlyLetters(text)) continue;
-        if (w * h > pageArea * 0.2 && w > canvas.width * 0.5) continue;
+        // Small labels often score low confidence; accept longer real English more easily
+        let minConf = confMin;
+        if (text.length >= 12) minConf = Math.min(confMin, 35);
+        else if (text.length >= 8) minConf = Math.min(confMin, 42);
+        if (conf < minConf || looksLikeGarbage(text) || !isMostlyLetters(text)) continue;
+        if (w * h > pageArea * 0.2 && w > pageW * 0.5) continue;
         lines.push({
           x: b.x0 || 0,
           y: b.y0 || 0,
           w: w,
           h: h,
-          fontHeight: Math.max(10, h),
+          fontHeight: Math.max(8, h),
           text: text,
           parts: [],
           conf: conf,
@@ -374,6 +391,90 @@
       }
     }
     if (!lines.length) lines = wordsToLines(words);
+    return lines;
+  }
+
+  function scaleLines(lines, inv) {
+    return lines.map(function (l) {
+      return {
+        x: l.x * inv,
+        y: l.y * inv,
+        w: l.w * inv,
+        h: l.h * inv,
+        fontHeight: l.fontHeight * inv,
+        text: l.text,
+        parts: l.parts || [],
+        conf: l.conf,
+      };
+    });
+  }
+
+  function mergeLineLists(a, b) {
+    const out = a.slice();
+    for (let i = 0; i < b.length; i++) {
+      const cand = b[i];
+      let dup = false;
+      for (let j = 0; j < out.length; j++) {
+        const e = out[j];
+        const textNear =
+          e.text === cand.text ||
+          e.text.indexOf(cand.text) >= 0 ||
+          cand.text.indexOf(e.text) >= 0;
+        const cx1 = e.x + e.w / 2;
+        const cy1 = e.y + e.h / 2;
+        const cx2 = cand.x + cand.w / 2;
+        const cy2 = cand.y + cand.h / 2;
+        const boxNear =
+          Math.abs(cx1 - cx2) < Math.max(e.w, cand.w) * 0.55 &&
+          Math.abs(cy1 - cy2) < Math.max(e.h, cand.h) * 0.8;
+        if (textNear && boxNear) {
+          // keep the longer / higher-confidence line
+          if (cand.text.length > e.text.length || cand.conf > e.conf + 5) {
+            out[j] = cand;
+          }
+          dup = true;
+          break;
+        }
+      }
+      if (!dup) out.push(cand);
+    }
+    return out;
+  }
+
+  /**
+   * OCR one image canvas.
+   * Dual-pass: normal + upscaled (helps small labels).
+   */
+  async function ocrCanvas(canvas, onProgress) {
+    const worker = await getWorker(onProgress);
+    if (onProgress) onProgress({ status: "recognizing_base", progress: 0.15 });
+    const ocrInput = makeOcrCanvas(canvas);
+    const result = await worker.recognize(ocrInput);
+    const data = result && result.data;
+    let lines = extractLinesFromResult(data, canvas.width, canvas.height, 45);
+    const words = (data && data.words) || [];
+
+    // Small-text rescue: upscale and OCR again, then map boxes back
+    const avgH =
+      lines.length > 0
+        ? lines.reduce(function (s, l) {
+            return s + l.fontHeight;
+          }, 0) / lines.length
+        : 0;
+    const needZoom = lines.length < 8 || avgH < 16 || avgH === 0;
+    if (needZoom) {
+      if (onProgress) onProgress({ status: "recognizing_zoom", progress: 0.45 });
+      const UP = 1.8;
+      const up = upscaleCanvas(canvas, UP);
+      const upOcr = makeOcrCanvas(up);
+      const result2 = await worker.recognize(upOcr);
+      const lines2 = scaleLines(
+        extractLinesFromResult(result2 && result2.data, up.width, up.height, 38),
+        1 / UP
+      );
+      lines = mergeLineLists(lines, lines2);
+    }
+
     return { lines: lines, words: words, text: (data && data.text) || "" };
   }
 

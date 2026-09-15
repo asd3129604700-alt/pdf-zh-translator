@@ -17,7 +17,7 @@
         <span class="brand-mark" aria-hidden="true">译</span>
         <div>
           <h1>PDF / 图片 中文转换器</h1>
-          <p class="tagline">上传 PDF 或多张图片 · 识别文字 · 生成中文版</p>
+          <p class="tagline">上传 PDF 或多张图片 · 本地识别 · 生成清晰中文版</p>
         </div>
       </div>
       <div class="header-meta">
@@ -40,7 +40,7 @@
               </svg>
             </div>
             <h2>拖入 PDF，或多选图片</h2>
-            <p>支持 PDF；也可一次选择多张 JPG / PNG / WebP。图片会本地 OCR 识别英文后翻译嵌字。</p>
+            <p>支持 PDF（1 个）与 JPG / PNG / WebP（可多选）。默认本地 OCR，无需注册或 API Key。</p>
             <label class="btn btn-primary" for="file-input">选择文件</label>
             <input id="file-input" type="file" accept="application/pdf,.pdf,image/*,.jpg,.jpeg,.png,.webp,.bmp" multiple hidden />
             <p id="file-list" class="file-list hidden"></p>
@@ -56,19 +56,19 @@
             </select>
           </label>
           <label class="field">
-            <span>翻译服务</span>
+            <span>文本翻译</span>
             <select id="opt-service">
-              <option value="auto" selected>自动（多源回退）</option>
+              <option value="auto" selected>自动（Google / MyMemory）</option>
               <option value="google">Google 翻译</option>
               <option value="mymemory">MyMemory</option>
-              <option value="dict">仅提取对照（不调 API）</option>
+              <option value="dict">仅词表对照（不调 API）</option>
             </select>
           </label>
           <label class="field">
-            <span>图片模式</span>
+            <span>图片识别</span>
             <select id="opt-image-mode">
-              <option value="ocr" selected>本地 OCR（快速）</option>
-              <option value="gemini">Gemini 视觉（高质量）</option>
+              <option value="ocr" selected>本地 OCR（推荐，无需 Key）</option>
+              <option value="gemini">Gemini 视觉 API（更准，自备 Key）</option>
             </select>
           </label>
           <label class="field checkbox">
@@ -77,16 +77,25 @@
           </label>
           <label class="field checkbox">
             <input type="checkbox" id="opt-preserve-codes" checked />
-            <span>保留 PMS/色号/数字代码</span>
-          </label>
-          <label class="field">
-            <span>Gemini API Key（高质量图片必填）</span>
-            <input id="opt-gemini-key" type="password" placeholder="AIza..." autocomplete="off" />
+            <span>保留 PMS / 色号 / 数字代码</span>
           </label>
         </div>
-        <p class="hint">
-          复杂规格图 / 彩色标注建议用「Gemini 视觉」。密钥仅保存在本机浏览器，不会上传到本站服务器。
-        </p>
+
+        <div class="api-panel">
+          <div class="api-panel-head">
+            <h3>可选 API（自己填，不填也能用）</h3>
+            <span class="api-badge">可选</span>
+          </div>
+          <p class="hint">
+            默认全流程在浏览器本地完成。若图片很复杂（彩色标注、小字、艺术字），可自备
+            <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Google AI Studio 的 Gemini API Key</a>
+            切换到「Gemini 视觉」。Key 只存在你的浏览器，不会上传到本站。
+          </p>
+          <label class="field">
+            <span>Gemini API Key（仅图片模式选 Gemini 时需要）</span>
+            <input id="opt-gemini-key" type="password" placeholder="AIza..." autocomplete="off" spellcheck="false" />
+          </label>
+        </div>
       </section>
 
       <!-- Processing -->
@@ -102,7 +111,7 @@
           <li data-step="load"><span class="step-dot"></span>加载文件</li>
           <li data-step="extract"><span class="step-dot"></span>提取 / OCR</li>
           <li data-step="translate"><span class="step-dot"></span>翻译为中文</li>
-          <li data-step="compose"><span class="step-dot"></span>生成中文页</li>
+          <li data-step="compose"><span class="step-dot"></span>生成清晰中文页</li>
           <li data-step="done"><span class="step-dot"></span>完成</li>
         </ol>
         <p id="process-log" class="log"></p>
@@ -154,7 +163,7 @@
     </main>
 
     <footer class="footer">
-      <p>文字提取在浏览器本地完成；翻译请求会发往所选翻译服务。请勿上传含敏感信息的文件到公共翻译接口。</p>
+      <p>文字提取与 OCR 在浏览器本地完成；文本翻译会发往所选公共接口。请勿上传含敏感信息的文件。</p>
     </footer>
   </div>
 

@@ -221,9 +221,9 @@
           service: t.service,
         });
       }
-      const original = await PdfEngine.renderPageOriginal(ex.page, 2);
+      const original = await PdfEngine.renderPageOriginal(ex.page, 3);
       const translatedCanvas = await PdfEngine.renderPageComposed(ex.page, {
-        scale: 2,
+        scale: 3,
         cover: cover,
         lines: ex.lines,
         map: map,
@@ -241,7 +241,7 @@
   }
 
   async function processImageFile(file, options, cover, onOcrProgress, onTranslateProgress) {
-    const loaded = await ImageEngine.loadFileToCanvas(file, 2200);
+    const loaded = await ImageEngine.loadFileToCanvas(file, 2800);
     const original = document.createElement("canvas");
     original.width = loaded.canvas.width;
     original.height = loaded.canvas.height;

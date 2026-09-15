@@ -5,8 +5,9 @@
   "use strict";
 
   const CACHE = new Map();
-  const OPEN = "⟦";
-  const CLOSE = "⟧";
+  // ASCII-safe placeholders — rare bracket chars get mangled by MT engines
+  const OPEN = "ZXQ";
+  const CLOSE = "QXZ";
 
   // Longest / compound phrases first so they win over single words.
   const GLOSSARY = [

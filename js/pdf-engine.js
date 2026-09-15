@@ -288,7 +288,7 @@
     return renderPageComposed(pdfPage, { scale: scale || 2, cover: false });
   }
 
-  /** Build a multi-page PDF from canvases using jsPDF. */
+  /** Build a multi-page PDF from canvases. PNG embed keeps Chinese text crisp. */
   function canvasesToPdf(canvases) {
     if (!canvases.length) throw new Error("没有可导出的页面");
     const { jsPDF } = global.jspdf;
@@ -296,20 +296,24 @@
     for (let i = 0; i < canvases.length; i++) {
       const canvas = canvases[i];
       const orientation = canvas.width >= canvas.height ? "landscape" : "portrait";
-      const pxW = canvas.width;
-      const pxH = canvas.height;
-      // Use pt units matching aspect; scale so max side ~ 842 or 595
-      const maxSide = orientation === "landscape" ? 842 : 595;
-      const k = maxSide / Math.max(pxW, pxH);
-      const w = pxW * k;
-      const h = pxH * k;
+      // Large page size so raster text stays sharp when zoomed
+      const pxMax = Math.max(canvas.width, canvas.height);
+      const k = 1600 / pxMax;
+      const w = canvas.width * k;
+      const h = canvas.height * k;
       if (i === 0) {
-        pdf = new jsPDF({ orientation: orientation, unit: "pt", format: [w, h] });
+        pdf = new jsPDF({
+          orientation: orientation,
+          unit: "pt",
+          format: [w, h],
+          compress: true,
+        });
       } else {
         pdf.addPage([w, h], orientation);
       }
-      const data = canvas.toDataURL("image/jpeg", 0.92);
-      pdf.addImage(data, "JPEG", 0, 0, w, h, undefined, "FAST");
+      // PNG is lossless — JPEG was making Chinese glyphs mushy
+      const data = canvas.toDataURL("image/png");
+      pdf.addImage(data, "PNG", 0, 0, w, h, undefined, "FAST");
     }
     return pdf;
   }
