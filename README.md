@@ -2,9 +2,17 @@
 
 上传 PDF → 本地提取文字 → 多源翻译 → 覆盖原文并写入中文 → 下载中文版 PDF。
 
+**在线使用：** https://asd3129604700-alt.github.io/pdf-zh-translator/
+
 灵感来自 [ShinobuTranslator](https://github.com/DonutShinobu/ShinobuTranslator) 的「识别 → 翻译 → 嵌字」思路，针对 PDF 文档做了网页版实现。
 
 ## 使用
+
+### 在线（推荐）
+
+打开上面的链接，拖入 PDF 即可，无需安装。
+
+### 本地运行
 
 在本目录启动静态服务后打开 `index.html`：
 
