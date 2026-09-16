@@ -487,100 +487,239 @@
     const worker = await getWorker(onProgress);
     const W = canvas.width;
     const H = canvas.height;
-    const long = Math.max(W, H);
 
-    // Grid: wide → 2x1; tall → 1x2; large/square → 2x2
+    // --- Pass 0: coarse detect where text lives (downscaled) ---
+    if (onProgress) onProgress({ status: "detect_text_regions", progress: 0.04 });
+    let probeLines = [];
+    try {
+      const probeScale = Math.min(1, 900 / Math.max(W, H));
+      const pw = Math.max(80, Math.round(W * probeScale));
+      const ph = Math.max(80, Math.round(H * probeScale));
+      const probe = document.createElement("canvas");
+      probe.width = pw;
+      probe.height = ph;
+      const pctx = probe.getContext("2d", { willReadFrequently: true });
+      pctx.imageSmoothingEnabled = true;
+      pctx.imageSmoothingQuality = "high";
+      pctx.drawImage(canvas, 0, 0, pw, ph);
+      const probeOcr = makeOcrCanvas(probe);
+      const probeRes = await worker.recognize(probeOcr);
+      const inv = 1 / probeScale;
+      probeLines = extractLinesFromResult(probeRes && probeRes.data, pw, ph, 35).map(
+        function (l) {
+          return {
+            x: l.x * inv,
+            y: l.y * inv,
+            w: l.w * inv,
+            h: l.h * inv,
+            text: l.text,
+          };
+        }
+      );
+    } catch (e) {
+      probeLines = [];
+    }
+
+    // If probe already found a lot of clear text, use those boxes directly
+    // (still re-OCR tiles that contain them for better small-text quality)
+    const hasProbe = probeLines.length >= 3;
+
+    // Analyze distribution → choose 2 vs 4 tiles
     let cols = 2;
     let rows = 1;
-    if (W > H * 1.15) {
-      cols = 2;
-      rows = 1;
-    } else if (H > W * 1.15) {
-      cols = 1;
-      rows = 2;
+    if (hasProbe) {
+      let left = 0;
+      let right = 0;
+      let top = 0;
+      let bottom = 0;
+      const midX = W / 2;
+      const midY = H / 2;
+      for (let i = 0; i < probeLines.length; i++) {
+        const cx = probeLines[i].x + probeLines[i].w / 2;
+        const cy = probeLines[i].y + probeLines[i].h / 2;
+        if (cx < midX) left++;
+        else right++;
+        if (cy < midY) top++;
+        else bottom++;
+      }
+      const n = probeLines.length;
+      const spreadX = Math.min(left, right) / n; // 0.5 = balanced L/R
+      const spreadY = Math.min(top, bottom) / n;
+
+      if (spreadX < 0.18 && spreadY < 0.18) {
+        // Text clustered in one quadrant → 2 tiles on dominant axis
+        if (left + right > 0 && Math.abs(left - right) > Math.abs(top - bottom)) {
+          cols = 2;
+          rows = 1;
+        } else {
+          cols = 1;
+          rows = 2;
+        }
+      } else if (spreadX >= 0.18 && spreadY >= 0.18) {
+        // Text in multiple quadrants → 2x2
+        cols = 2;
+        rows = 2;
+      } else if (spreadX >= 0.18) {
+        cols = 2;
+        rows = 1;
+      } else {
+        cols = 1;
+        rows = 2;
+      }
+      // Dense / many lines → prefer 4 tiles for resolution
+      if (n >= 12 || Math.max(W, H) >= 1600) {
+        cols = 2;
+        rows = 2;
+      }
     } else {
-      cols = 2;
-      rows = 2;
+      // No probe text: fall back to aspect ratio (original behavior)
+      if (W > H * 1.15) {
+        cols = 2;
+        rows = 1;
+      } else if (H > W * 1.15) {
+        cols = 1;
+        rows = 2;
+      } else {
+        cols = 2;
+        rows = 2;
+      }
+      if (Math.max(W, H) >= 1600) {
+        cols = 2;
+        rows = 2;
+      }
     }
-    // Very large images always 2x2
-    if (long >= 1600) {
-      cols = 2;
-      rows = 2;
+
+    if (onProgress) {
+      onProgress({
+        status: "tile_grid_" + cols + "x" + rows,
+        progress: 0.08,
+      });
     }
 
     // Overlap so text at tile borders is not cut
     const overlap = Math.round(Math.min(W / cols, H / rows) * 0.08);
-    // Target long-side after upscale per tile (100%→~1.0 already large; force ≥1.6× for small tiles)
     const tileW = Math.ceil(W / cols);
     const tileH = Math.ceil(H / rows);
     let up = opts.zoom || 2;
-    // If tile is already huge, cap zoom to avoid memory blowup
     const tileLong = Math.max(tileW, tileH) * up;
     if (tileLong > 2800) up = Math.max(1.2, 2800 / Math.max(tileW, tileH));
-    // Ensure small tiles get at least ~1600px on long side
     const minUp = 1600 / Math.max(tileW, tileH);
     if (up < minUp && minUp <= 3) up = Math.min(3, minUp);
 
-    const total = cols * rows;
-    let doneTiles = 0;
-    let allLines = [];
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-
+    // Build tile list; skip tiles with no probe text (save time)
+    const tiles = [];
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const x0 = Math.max(0, Math.floor(c * tileW) - (c > 0 ? overlap : 0));
         const y0 = Math.max(0, Math.floor(r * tileH) - (r > 0 ? overlap : 0));
-        const x1 = Math.min(W, Math.floor((c + 1) * tileW) + (c < cols - 1 ? overlap : 0));
-        const y1 = Math.min(H, Math.floor((r + 1) * tileH) + (r < rows - 1 ? overlap : 0));
+        const x1 = Math.min(
+          W,
+          Math.floor((c + 1) * tileW) + (c < cols - 1 ? overlap : 0)
+        );
+        const y1 = Math.min(
+          H,
+          Math.floor((r + 1) * tileH) + (r < rows - 1 ? overlap : 0)
+        );
         const tw = x1 - x0;
         const th = y1 - y0;
         if (tw < 8 || th < 8) continue;
 
-        if (onProgress) {
-          onProgress({
-            status: "tile_" + (doneTiles + 1) + "_of_" + total,
-            progress: 0.05 + (doneTiles / total) * 0.85,
+        let hasText = true;
+        if (hasProbe) {
+          hasText = probeLines.some(function (L) {
+            const cx = L.x + L.w / 2;
+            const cy = L.y + L.h / 2;
+            return cx >= x0 - 4 && cx <= x1 + 4 && cy >= y0 - 4 && cy <= y1 + 4;
           });
         }
-
-        const tile = document.createElement("canvas");
-        tile.width = tw;
-        tile.height = th;
-        const tctx = tile.getContext("2d", { willReadFrequently: true });
-        tctx.imageSmoothingEnabled = true;
-        tctx.imageSmoothingQuality = "high";
-        tctx.drawImage(canvas, x0, y0, tw, th, 0, 0, tw, th);
-
-        const upTile = upscaleCanvas(tile, up);
-        const ocrIn = makeOcrCanvas(upTile);
-        const result = await worker.recognize(ocrIn);
-        const tileLines = extractLinesFromResult(
-          result && result.data,
-          upTile.width,
-          upTile.height,
-          40
-        );
-
-        // Map tile-local coords → full-image coords
-        for (let i = 0; i < tileLines.length; i++) {
-          const L = tileLines[i];
-          allLines.push({
-            x: x0 + L.x / up,
-            y: y0 + L.y / up,
-            w: L.w / up,
-            h: L.h / up,
-            fontHeight: L.fontHeight / up,
-            text: L.text,
-            parts: [],
-            conf: L.conf,
-          });
+        if (hasText) tiles.push({ x0: x0, y0: y0, tw: tw, th: th, c: c, r: r });
+      }
+    }
+    // Safety: if all skipped, process all tiles
+    if (!tiles.length) {
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const x0 = Math.max(0, Math.floor(c * tileW) - (c > 0 ? overlap : 0));
+          const y0 = Math.max(0, Math.floor(r * tileH) - (r > 0 ? overlap : 0));
+          const x1 = Math.min(
+            W,
+            Math.floor((c + 1) * tileW) + (c < cols - 1 ? overlap : 0)
+          );
+          const y1 = Math.min(
+            H,
+            Math.floor((r + 1) * tileH) + (r < rows - 1 ? overlap : 0)
+          );
+          const tw = x1 - x0;
+          const th = y1 - y0;
+          if (tw >= 8 && th >= 8) tiles.push({ x0: x0, y0: y0, tw: tw, th: th, c: c, r: r });
         }
-        doneTiles++;
       }
     }
 
+    const total = tiles.length;
+    let doneTiles = 0;
+    let allLines = hasProbe ? probeLines.slice() : [];
+
+    for (let t = 0; t < tiles.length; t++) {
+      const tileInfo = tiles[t];
+      const x0 = tileInfo.x0;
+      const y0 = tileInfo.y0;
+      const tw = tileInfo.tw;
+      const th = tileInfo.th;
+
+      if (onProgress) {
+        onProgress({
+          status: "tile_" + (doneTiles + 1) + "_of_" + total,
+          progress: 0.1 + (doneTiles / Math.max(1, total)) * 0.8,
+        });
+      }
+
+      const tile = document.createElement("canvas");
+      tile.width = tw;
+      tile.height = th;
+      const tctx = tile.getContext("2d", { willReadFrequently: true });
+      tctx.imageSmoothingEnabled = true;
+      tctx.imageSmoothingQuality = "high";
+      tctx.drawImage(canvas, x0, y0, tw, th, 0, 0, tw, th);
+
+      const upTile = upscaleCanvas(tile, up);
+      const ocrIn = makeOcrCanvas(upTile);
+      const result = await worker.recognize(ocrIn);
+      const tileLines = extractLinesFromResult(
+        result && result.data,
+        upTile.width,
+        upTile.height,
+        40
+      );
+
+      for (let i = 0; i < tileLines.length; i++) {
+        const L = tileLines[i];
+        allLines.push({
+          x: x0 + L.x / up,
+          y: y0 + L.y / up,
+          w: L.w / up,
+          h: L.h / up,
+          fontHeight: L.fontHeight / up,
+          text: L.text,
+          parts: [],
+          conf: L.conf,
+        });
+      }
+      doneTiles++;
+    }
+
     allLines = mergeLineLists([], allLines);
-    return { lines: allLines, words: [], text: allLines.map(function (l) { return l.text; }).join("\n") };
+    return {
+      lines: allLines,
+      words: [],
+      text: allLines
+        .map(function (l) {
+          return l.text;
+        })
+        .join("\n"),
+      grid: cols + "x" + rows,
+      tilesProcessed: doneTiles,
+    };
   }
 
   function wrapText(ctx, text, maxWidth) {

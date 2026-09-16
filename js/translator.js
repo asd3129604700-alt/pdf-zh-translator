@@ -145,8 +145,12 @@
   function openaiEndpoint(baseUrl) {
     let u = String(baseUrl || "").trim().replace(/\/+$/, "");
     if (!u) throw new Error("未填写 API Base URL");
+    // Shinobu-style: baseUrl already includes /v1, append /chat/completions
     if (/\/chat\/completions$/i.test(u)) return u;
     if (/\/v1$/i.test(u)) return u + "/chat/completions";
+    // DeepSeek official is https://api.deepseek.com/v1/chat/completions
+    // also accepts https://api.deepseek.com/chat/completions
+    if (/deepseek\.com$/i.test(u)) return u + "/chat/completions";
     return u + "/v1/chat/completions";
   }
 
@@ -168,6 +172,7 @@
     }
     return {
       endpoint: openaiEndpoint(baseUrl),
+      baseUrl: baseUrl,
       apiKey: (options.llmApiKey || "").trim(),
       model: model,
       label: label,
@@ -176,8 +181,118 @@
   }
 
   /**
+   * Robust chat-completions POST (ported from ShinobuTranslator browser-runtime):
+   * - Bearer auth, cache no-store
+   * - retry 429 / 5xx (max 2), honor Retry-After, expo backoff
+   * - surface API error.message clearly
+   */
+  const MAX_RETRIES = 2;
+  const MAX_RETRY_DELAY_MS = 10000;
+
+  function sleepMs(ms, signal) {
+    if (signal && signal.aborted) {
+      return Promise.reject(signal.reason || new DOMException("已取消", "AbortError"));
+    }
+    return new Promise(function (resolve, reject) {
+      const onAbort = function () {
+        clearTimeout(timer);
+        reject(signal && signal.reason ? signal.reason : new DOMException("已取消", "AbortError"));
+      };
+      const timer = setTimeout(function () {
+        if (signal) signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  function retryableStatus(status) {
+    return status === 429 || status >= 500;
+  }
+
+  function retryDelayMs(response, retryIndex) {
+    const retryAfter = response && response.headers && response.headers.get("retry-after");
+    if (retryAfter) {
+      const seconds = Number(retryAfter);
+      if (Number.isFinite(seconds) && seconds >= 0) {
+        return Math.min(MAX_RETRY_DELAY_MS, seconds * 1000);
+      }
+      const at = Date.parse(retryAfter);
+      if (Number.isFinite(at)) {
+        return Math.min(MAX_RETRY_DELAY_MS, Math.max(0, at - Date.now()));
+      }
+    }
+    return Math.min(MAX_RETRY_DELAY_MS, 500 * Math.pow(2, retryIndex));
+  }
+
+  function apiErrorDetail(parsed, responseText) {
+    if (parsed && parsed.error && typeof parsed.error.message === "string") {
+      return parsed.error.message;
+    }
+    if (parsed && typeof parsed.message === "string") return parsed.message;
+    if (parsed && typeof parsed.detail === "string") return parsed.detail;
+    if (responseText) return String(responseText).slice(0, 240);
+    return null;
+  }
+
+  async function postChatCompletion(endpoint, apiKey, body, signal) {
+    let response = null;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer " + apiKey,
+          },
+          body: JSON.stringify(body),
+          cache: "no-store",
+          signal: signal,
+        });
+      } catch (error) {
+        if (signal && signal.aborted) throw error;
+        const err = new Error("网络请求失败（无法连接 API）");
+        err.retryable = error instanceof TypeError;
+        throw err;
+      }
+      if (!retryableStatus(response.status) || attempt === MAX_RETRIES) break;
+      const delay = retryDelayMs(response, attempt);
+      try {
+        if (response.body) await response.body.cancel();
+      } catch (e) { /* ignore */ }
+      await sleepMs(delay, signal);
+    }
+    if (!response) throw new Error("API 请求未能启动");
+
+    let responseText = "";
+    try {
+      responseText = await response.text();
+    } catch (error) {
+      if (signal && signal.aborted) throw error;
+      throw new Error("API 响应读取失败");
+    }
+    let parsed = null;
+    try {
+      parsed = responseText ? JSON.parse(responseText) : null;
+    } catch (e) {
+      parsed = null;
+    }
+    if (!response.ok) {
+      const detail = apiErrorDetail(parsed, responseText) || "HTTP " + response.status;
+      const err = new Error("API 调用失败：" + detail);
+      err.status = response.status;
+      err.responseText = responseText;
+      err.detail = detail;
+      throw err;
+    }
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("API 响应解析失败");
+    }
+    return parsed;
+  }
+
+  /**
    * OpenAI-compatible chat translate (DeepSeek / custom).
-   * options: { target, llmProvider, llmBaseUrl, llmApiKey, llmModel }
    */
   async function translateOpenAICompat(text, options) {
     const cfg = openaiConfig(options);
@@ -188,16 +303,12 @@
     const ctrl = new AbortController();
     const timer = setTimeout(function () {
       ctrl.abort();
-    }, 60000);
+    }, 90000);
     try {
-      const res = await fetch(cfg.endpoint, {
-        method: "POST",
-        signal: ctrl.signal,
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + cfg.apiKey,
-        },
-        body: JSON.stringify({
+      const json = await postChatCompletion(
+        cfg.endpoint,
+        cfg.apiKey,
+        {
           model: cfg.model,
           temperature: 0.1,
           messages: [
@@ -210,18 +321,9 @@
             },
             { role: "user", content: text },
           ],
-        }),
-      });
-      const json = await res.json().catch(function () {
-        return null;
-      });
-      if (!res.ok) {
-        const msg =
-          (json && json.error && json.error.message) || "HTTP " + res.status;
-        const err = new Error(cfg.label + " API 调用失败：" + msg);
-        err.status = res.status;
-        throw err;
-      }
+        },
+        ctrl.signal
+      );
       const out =
         json &&
         json.choices &&
@@ -259,18 +361,13 @@
       const ctrl = new AbortController();
       const timer = setTimeout(function () {
         ctrl.abort();
-      }, 90000);
+      }, 120000);
       let json = null;
-      let res = null;
       try {
-        res = await fetch(cfg.endpoint, {
-          method: "POST",
-          signal: ctrl.signal,
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: "Bearer " + cfg.apiKey,
-          },
-          body: JSON.stringify({
+        json = await postChatCompletion(
+          cfg.endpoint,
+          cfg.apiKey,
+          {
             model: cfg.model,
             temperature: 0.1,
             messages: [
@@ -281,21 +378,11 @@
               },
               { role: "user", content: user },
             ],
-          }),
-        });
-        json = await res.json().catch(function () {
-          return null;
-        });
+          },
+          ctrl.signal
+        );
       } finally {
         clearTimeout(timer);
-      }
-      if (!res || !res.ok) {
-        const msg =
-          (json && json.error && json.error.message) ||
-          (res ? "HTTP " + res.status : "网络错误");
-        const err = new Error(cfg.label + " API 调用失败：" + msg);
-        err.status = res && res.status;
-        throw err;
       }
       const content =
         json &&
@@ -348,27 +435,16 @@
       ctrl.abort();
     }, 30000);
     try {
-      const res = await fetch(cfg.endpoint, {
-        method: "POST",
-        signal: ctrl.signal,
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer " + cfg.apiKey,
-        },
-        body: JSON.stringify({
+      await postChatCompletion(
+        cfg.endpoint,
+        cfg.apiKey,
+        {
           model: cfg.model,
           max_tokens: 8,
           messages: [{ role: "user", content: "ping" }],
-        }),
-      });
-      const json = await res.json().catch(function () {
-        return null;
-      });
-      if (!res.ok) {
-        const msg =
-          (json && json.error && json.error.message) || "HTTP " + res.status;
-        throw new Error(cfg.label + " API 调用失败：" + msg);
-      }
+        },
+        ctrl.signal
+      );
       return { ok: true, label: cfg.label, model: cfg.model, endpoint: cfg.endpoint };
     } finally {
       clearTimeout(timer);
