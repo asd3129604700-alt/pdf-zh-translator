@@ -62,23 +62,37 @@
     deepseek: {
       baseUrl: "https://api.deepseek.com",
       model: "deepseek-chat",
+      models: [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-v4",
+        "deepseek-v4.1",
+        "deepseek-v4.1f",
+      ],
       label: "DeepSeek",
       keyUrl: "https://platform.deepseek.com/api_keys",
-      note: "DeepSeek：优化英文→中文译文（图片识别仍用本地切块 OCR）。",
+      note: "DeepSeek：优化英文→中文译文（图片识别仍用本地切块 OCR）。可点「拉取模型列表」获取你账号可用的全部模型 ID。",
     },
     openai: {
       baseUrl: "https://api.openai.com",
       model: "gpt-4o-mini",
+      models: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"],
       label: "OpenAI 兼容",
       keyUrl: "https://platform.openai.com/api-keys",
-      note: "自定义 OpenAI 兼容：填任意兼容 /v1/chat/completions 的地址。",
+      note: "自定义 OpenAI 兼容：填任意兼容 /v1/chat/completions 的地址与模型名。",
     },
     gemini: {
       baseUrl: "https://generativelanguage.googleapis.com",
       model: "gemini-2.0-flash",
+      models: [
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+      ],
       label: "Gemini",
       keyUrl: "https://aistudio.google.com/apikey",
-      note: "Gemini：直接看图识别文字并翻译，适合彩标 / 艺术字。",
+      note: "Gemini：直接看图识别文字并翻译，适合彩标 / 艺术字。模型会按你选的 ID 调用。",
     },
   };
 
@@ -179,19 +193,32 @@
     if (force || !els.optBaseUrl.value.trim()) {
       els.optBaseUrl.value = p.baseUrl;
     }
-    if (force || !els.optModelCustom.value.trim()) {
-      if (force) {
-        els.optModel.innerHTML =
-          '<option value="' + p.model + '">' + p.model + "（默认）</option>";
-        els.optModel.value = p.model;
-        els.optModelCustom.value = "";
-      }
+    if (force) {
+      const list = p.models && p.models.length ? p.models : [p.model];
+      els.optModel.innerHTML = "";
+      list.forEach(function (id, idx) {
+        const opt = document.createElement("option");
+        opt.value = id;
+        opt.textContent = id + (idx === 0 ? "（默认）" : "");
+        els.optModel.appendChild(opt);
+      });
+      els.optModel.value = p.model;
+      els.optModelCustom.value = "";
+    } else if (!els.optModel.options.length) {
+      const list = p.models && p.models.length ? p.models : [p.model];
+      list.forEach(function (id, idx) {
+        const opt = document.createElement("option");
+        opt.value = id;
+        opt.textContent = id + (idx === 0 ? "（默认）" : "");
+        els.optModel.appendChild(opt);
+      });
     }
     if (els.linkKey) els.linkKey.href = p.keyUrl;
     if (els.apiNote) {
       els.apiNote.innerHTML =
         p.note +
-        "<br />填好 Base URL + Key 后点「拉取模型列表」，再从下拉框选择模型。未配置成功不会静默改用免费接口。";
+        "<br />可在下拉框直接选模型，或在下方输入框填写任意模型 ID（例如 <code>dsv4.1f</code> / <code>deepseek-v4.1</code>）。" +
+        "填好 Key 后点「拉取模型列表」可获取你账号真实可用的模型。未配置成功不会静默改用免费接口。";
     }
   }
 
@@ -555,21 +582,23 @@
     if (options.vision === "gemini") {
       if (onProgress)
         onProgress({ status: "calling_gemini_api", progress: 0.15 });
-      // Use whole or tiled based on image size
+      const gModel = options.geminiModel || "gemini-2.0-flash";
       const longSide = Math.max(original.width, original.height);
       if (longSide >= 1400) {
         lines = await ImageEngine.geminiExtractLinesTiled(
           original,
           options.target || "zh-CN",
           options.geminiKey,
-          onProgress
+          onProgress,
+          gModel
         );
         engine = "gemini-tiled";
       } else {
         lines = await ImageEngine.geminiExtractLines(
           original,
           options.target || "zh-CN",
-          options.geminiKey
+          options.geminiKey,
+          gModel
         );
         engine = "gemini-whole";
       }
@@ -641,10 +670,20 @@
       const translated = rawTexts.length
         ? await PdfTranslator.translateMany(rawTexts, options)
         : [];
+      const useLlm =
+        options.service === "deepseek" || options.service === "openai";
       for (let k = 0; k < texts.length; k++) {
         const i = texts[k].i;
         let dst = translated[k].dst;
-        if (window.ImageEngine && ImageEngine.applyLocalGlossary) {
+        // Only apply local glossary when LLM was NOT used,
+        // or when LLM left a lot of English / failed.
+        const hasEnglish =
+          (String(dst).match(/[A-Za-z]{3,}/g) || []).length >= 2;
+        if (
+          window.ImageEngine &&
+          ImageEngine.applyLocalGlossary &&
+          (!useLlm || hasEnglish || !dst)
+        ) {
           const glossed = ImageEngine.applyLocalGlossary(lines[i].text);
           if (glossed !== lines[i].text) {
             const leftover = (glossed.match(/[A-Za-z]{3,}/g) || []).filter(
@@ -655,18 +694,6 @@
               }
             );
             if (leftover.length === 0) dst = glossed;
-          }
-        }
-        // Prefer glossary over bad MT for short domain labels
-        if (window.ImageEngine && ImageEngine.applyLocalGlossary) {
-          const g2 = ImageEngine.applyLocalGlossary(lines[i].text);
-          if (g2 !== lines[i].text && lines[i].text.length < 40) {
-            const leftover2 = (g2.match(/[A-Za-z]{3,}/g) || []).filter(
-              function (w) {
-                return !/^(please|use|and|for|the|with|from|on|to|of|at|by)$/i.test(w);
-              }
-            );
-            if (leftover2.length === 0) dst = g2;
           }
         }
         map[lines[i].text] = dst;

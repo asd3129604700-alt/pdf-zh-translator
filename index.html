@@ -167,11 +167,15 @@
             </div>
 
             <label class="field model-field">
-              <span>模型（可先点「拉取模型列表」）</span>
+              <span>模型（可下拉选择，或手动填任意模型 ID）</span>
               <select id="opt-model">
-                <option value="">— 请先拉取模型列表或手动填写 —</option>
+                <option value="deepseek-chat">deepseek-chat（默认）</option>
+                <option value="deepseek-reasoner">deepseek-reasoner</option>
+                <option value="deepseek-v4">deepseek-v4</option>
+                <option value="deepseek-v4.1">deepseek-v4.1</option>
+                <option value="deepseek-v4.1f">deepseek-v4.1f</option>
               </select>
-              <input id="opt-model-custom" type="text" placeholder="或手动输入模型名，如 deepseek-chat" autocomplete="off" spellcheck="false" />
+              <input id="opt-model-custom" type="text" placeholder="或手动输入，如 dsv4.1f / deepseek-v4.1（优先于下拉框）" autocomplete="off" spellcheck="false" />
             </label>
 
             <p id="api-test-result" class="api-test-result muted"></p>

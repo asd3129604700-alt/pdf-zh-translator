@@ -937,9 +937,14 @@
    * Optional high-quality path: Gemini vision returns cleaner line list + translations.
    * Requires user API key. Falls back to OCR if not configured / fails.
    */
-  async function geminiFetch(apiKey, body) {
+  async function geminiFetch(apiKey, body, model) {
+    const mid = (model || "gemini-2.0-flash").trim() || "gemini-2.0-flash";
+    // Strip models/ prefix if present
+    const modelId = mid.replace(/^models\//, "");
     const url =
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" +
+      "https://generativelanguage.googleapis.com/v1beta/models/" +
+      encodeURIComponent(modelId) +
+      ":generateContent?key=" +
       encodeURIComponent(apiKey);
     const res = await fetch(url, {
       method: "POST",
@@ -953,7 +958,7 @@
       const msg =
         (json && json.error && json.error.message) ||
         "HTTP " + res.status;
-      const err = new Error("Gemini API 调用失败：" + msg);
+      const err = new Error("Gemini API 调用失败（模型 " + modelId + "）：" + msg);
       err.status = res.status;
       err.payload = json;
       throw err;
@@ -963,7 +968,7 @@
   }
 
   /** Quick key check: tiny generateContent call. Throws with a clear message. */
-  async function testGeminiKey(apiKey) {
+  async function testGeminiKey(apiKey, model) {
     if (!apiKey || !apiKey.trim()) {
       throw new Error("未填写 Gemini API Key");
     }
@@ -971,10 +976,14 @@
     if (key.length < 10) {
       throw new Error("Gemini API Key 格式不正确（太短）");
     }
-    const json = await geminiFetch(key, {
-      contents: [{ parts: [{ text: "ping" }] }],
-      generationConfig: { maxOutputTokens: 8 },
-    });
+    const json = await geminiFetch(
+      key,
+      {
+        contents: [{ parts: [{ text: "ping" }] }],
+        generationConfig: { maxOutputTokens: 8 },
+      },
+      model
+    );
     const text =
       (json.candidates &&
         json.candidates[0] &&
@@ -986,13 +995,17 @@
     if (!json.candidates) {
       throw new Error("Gemini Key 校验失败：响应异常");
     }
-    return { ok: true, echo: String(text).slice(0, 40) };
+    return {
+      ok: true,
+      echo: String(text).slice(0, 40),
+      model: model || "gemini-2.0-flash",
+    };
   }
 
-  async function geminiExtractLines(imageCanvas, targetLang, apiKey) {
+  async function geminiExtractLines(imageCanvas, targetLang, apiKey, model) {
     if (!apiKey) throw new Error("未配置 Gemini API Key");
-    // Downscale for API payload
-    const maxSide = 1280;
+    // Higher res payload for better small-text; cap at 1536
+    const maxSide = 1536;
     let c = imageCanvas;
     if (Math.max(imageCanvas.width, imageCanvas.height) > maxSide) {
       const s = maxSide / Math.max(imageCanvas.width, imageCanvas.height);
@@ -1001,19 +1014,24 @@
       c.height = Math.round(imageCanvas.height * s);
       c.getContext("2d").drawImage(imageCanvas, 0, 0, c.width, c.height);
     }
-    const dataUrl = c.toDataURL("image/jpeg", 0.85);
+    const dataUrl = c.toDataURL("image/jpeg", 0.9);
     const b64 = dataUrl.split(",")[1];
     const langLabel = targetLang === "zh-TW" ? "繁體中文" : "简体中文";
     const prompt =
-      "你是产品规格图翻译器。识别图中所有可读的英文文字标签（忽略角色插画、logo装饰中不可读的碎片）。" +
-      "对每一条文字，返回 JSON 数组，不要 markdown。每项字段：\n" +
+      "你是玩具/产品规格图翻译专家。仔细识别图中所有**可读的英文标注文字**，" +
+      "包括：标题、PMS色号、SEPARATE PIECE、EMBROIDERY、材质说明、尺寸、SKU、角色名。" +
+      "忽略角色插画内部不可读的装饰碎片和噪声。" +
+      "翻译成" + langLabel + "时：保留 PMS/色号/SKU/数字原样；" +
+      "角色名 TAKANASHI KIARA / hololive / Jakks 不要音译，原样保留；" +
+      "工艺词：SEPARATE PIECE=独立部件，EMBROIDERY=刺绣，APPLIQUE=贴布绣，PRINTED GRAPHIC=印花图案，GRADIENT=渐变。" +
+      "返回 JSON 数组，不要 markdown 代码块。每项：\n" +
       "{\n" +
       '  "text": "原始英文",\n' +
       '  "translation": "' + langLabel + '译文",\n' +
       '  "x0": 数字, "y0": 数字, "x1": 数字, "y1": 数字\n' +
       "}\n" +
-      "坐标是相对图片左上角的归一化 0-1000 整数。" +
-      "只输出 JSON 数组本身。忽略无法辨认的碎片。";
+      "坐标是相对图片左上角的归一化 0-1000 整数，框住文字即可不要框住角色。" +
+      "只输出 JSON 数组本身。";
 
     const body = {
       contents: [
@@ -1026,7 +1044,7 @@
       ],
       generationConfig: { temperature: 0.1, responseMimeType: "application/json" },
     };
-    const json = await geminiFetch(apiKey, body);
+    const json = await geminiFetch(apiKey, body, model);
     const text =
       json?.candidates?.[0]?.content?.parts?.[0]?.text ||
       json?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") ||
@@ -1073,7 +1091,7 @@
    * Complex + API: split into 2/4 tiles, call Gemini per tile, map boxes back.
    * Better than whole-image Gemini on dense specs; more API calls (2–4).
    */
-  async function geminiExtractLinesTiled(imageCanvas, targetLang, apiKey, onProgress) {
+  async function geminiExtractLinesTiled(imageCanvas, targetLang, apiKey, onProgress, model) {
     if (!apiKey) throw new Error("未配置 Gemini API Key");
     const W = imageCanvas.width;
     const H = imageCanvas.height;
@@ -1131,9 +1149,10 @@
 
         let tileLines = [];
         try {
-          tileLines = await geminiExtractLines(tile, targetLang, apiKey);
+          tileLines = await geminiExtractLines(tile, targetLang, apiKey, model);
         } catch (err) {
           console.warn("Gemini tile failed", done + 1, err);
+          if (done === 0) throw err; // fail loud on first tile
           tileLines = [];
         }
 

@@ -429,9 +429,12 @@
             {
               role: "system",
               content:
-                "你是专业产品规格/文档译者。把用户给出的英文准确翻译成" +
+                "你是玩具/产品规格图译者。把英文准确翻译成" +
                 langName +
-                "。保留数字、单位、色号（如 PMS 361 C）、SKU。只输出译文，不要解释。",
+                "。先纠正明显 OCR 错误再翻译。保留 PMS/色号/SKU/数字。" +
+                "角色名 TAKANASHI KIARA / hololive / Jakks 原样保留。" +
+                "SEPARATE PIECE=独立部件，EMBROIDERY=刺绣，APPLIQUE=贴布绣，PRINTED GRAPHIC=印花图案，GRADIENT=渐变。" +
+                "只输出译文，不要解释。",
             },
             { role: "user", content: text },
           ],
@@ -466,10 +469,15 @@
         return { id: start + i, text: t };
       });
       const user =
-        "把下列英文条目翻译成" +
+        "你是玩具/产品规格图译者。把下列从 OCR 得到的英文条目翻译成" +
         langName +
-        "。返回 JSON 数组，每项 {\"id\":数字,\"translation\":\"译文\"}。" +
-        "保留数字/单位/PMS色号/SKU。不要输出其它文字。\n" +
+        "。\n" +
+        "要求：\n" +
+        "1. 先纠正明显 OCR 错误（如 sxeculion→execution, SEPARRTE→SEPARATE）再翻译\n" +
+        "2. 保留 PMS/色号/SKU/数字/单位原样\n" +
+        "3. 角色名 TAKANASHI KIARA、hololive、Jakks 原样保留，不要音译\n" +
+        "4. 工艺词固定译法：SEPARATE PIECE=独立部件，EMBROIDERY=刺绣，APPLIQUE=贴布绣，PRINTED GRAPHIC=印花图案，GRADIENT=渐变，MINI PLUSH=迷你毛绒\n" +
+        "5. 返回 JSON 数组，每项 {\"id\":数字,\"translation\":\"译文\"}。不要输出其它文字。\n" +
         JSON.stringify(indexed);
 
       const ctrl = new AbortController();
@@ -674,7 +682,11 @@
       const byText = {};
       for (let i = 0; i < unique.length; i++) {
         let dst = batchOut[i] || unique[i];
-        if (options.preserveCodes !== false) dst = applyGlossary(dst);
+        // Only glossary-fallback when LLM output still looks untranslated
+        const stillEn = (String(dst).match(/[A-Za-z]{3,}/g) || []).length >= 3;
+        if (options.preserveCodes !== false && stillEn) {
+          dst = applyGlossary(dst);
+        }
         dst = dst.replace(/\s+([，。；：！？、])/g, "$1").trim();
         byText[unique[i]] = { src: unique[i], dst: dst, service: svc };
       }
