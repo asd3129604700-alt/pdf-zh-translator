@@ -17,17 +17,16 @@
         <span class="brand-mark" aria-hidden="true">译</span>
         <div>
           <h1>PDF / 图片 中文转换器</h1>
-          <p class="tagline">上传 PDF 或多张图片 · 本地识别 · 生成清晰中文版</p>
+          <p class="tagline">上传文件 · 识别文字 · 生成清晰中文版</p>
         </div>
       </div>
       <div class="header-meta">
-        <span class="pill" id="engine-pill">本地解析 + OCR</span>
+        <span class="pill" id="mode-pill">普通模式</span>
         <a class="link" href="https://github.com/DonutShinobu/ShinobuTranslator" target="_blank" rel="noreferrer">灵感来源</a>
       </div>
     </header>
 
     <main>
-      <!-- Upload -->
       <section id="panel-upload" class="panel upload-panel">
         <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="上传 PDF 或图片">
           <div class="dropzone-inner">
@@ -40,14 +39,45 @@
               </svg>
             </div>
             <h2>拖入 PDF，或多选图片</h2>
-            <p>支持 PDF（1 个）与 JPG / PNG / WebP（可多选）。默认本地 OCR，无需注册或 API Key。</p>
+            <p>PDF（1 个）或 JPG / PNG / WebP（可多选）</p>
             <label class="btn btn-primary" for="file-input">选择文件</label>
             <input id="file-input" type="file" accept="application/pdf,.pdf,image/*,.jpg,.jpeg,.png,.webp,.bmp" multiple hidden />
             <p id="file-list" class="file-list hidden"></p>
           </div>
         </div>
 
-        <div class="options">
+        <!-- ========== Mode ========== -->
+        <div class="mode-block">
+          <div class="block-title">处理模式</div>
+          <div class="mode-cards" role="radiogroup" aria-label="处理模式">
+            <label class="mode-card">
+              <input type="radio" name="run-mode" value="normal" id="mode-normal" checked />
+              <div class="mode-card-body">
+                <div class="mode-card-title">普通模式</div>
+                <div class="mode-card-desc">
+                  本地 OCR + 免费翻译<br />
+                  <strong>不调用任何付费 / 第三方大模型 API</strong>
+                </div>
+              </div>
+            </label>
+            <label class="mode-card">
+              <input type="radio" name="run-mode" value="complex" id="mode-complex" />
+              <div class="mode-card-body">
+                <div class="mode-card-title">复杂模式</div>
+                <div class="mode-card-desc">
+                  切块放大识别 + 调用你的 API<br />
+                  <strong>需自备 Key，可自动拉取模型列表</strong>
+                </div>
+              </div>
+            </label>
+          </div>
+          <p class="hint" id="mode-hint">
+            普通模式适合清晰截图、文字层 PDF。密图、小字、彩标建议用复杂模式。
+          </p>
+        </div>
+
+        <!-- ========== Normal options ========== -->
+        <div id="normal-options" class="options">
           <label class="field">
             <span>目标语言</span>
             <select id="opt-lang">
@@ -56,22 +86,19 @@
             </select>
           </label>
           <label class="field">
-            <span>文本翻译</span>
+            <span>免费翻译源</span>
             <select id="opt-service">
               <option value="auto" selected>自动（Google / MyMemory）</option>
               <option value="google">Google 翻译</option>
               <option value="mymemory">MyMemory</option>
-              <option value="deepseek">DeepSeek（OpenAI 兼容）</option>
-              <option value="openai">自定义 OpenAI 兼容</option>
-              <option value="dict">仅词表对照（不调 API）</option>
+              <option value="dict">仅本地词表</option>
             </select>
           </label>
           <label class="field">
             <span>图片识别</span>
             <select id="opt-image-mode">
-              <option value="ocr" selected>本地 OCR（快速，无需 Key）</option>
-              <option value="complex">复杂图片模式（切块放大）</option>
-              <option value="gemini">Gemini 整图视觉（自备 Key）</option>
+              <option value="ocr" selected>本地 OCR（快速）</option>
+              <option value="tiled">本地切块 OCR（小字更好）</option>
             </select>
           </label>
           <label class="field checkbox">
@@ -80,60 +107,81 @@
           </label>
           <label class="field checkbox">
             <input type="checkbox" id="opt-preserve-codes" checked />
-            <span>保留 PMS / 色号 / 数字代码</span>
+            <span>保留 PMS / 色号 / SKU</span>
           </label>
         </div>
 
-        <div class="api-panel">
-          <div class="api-panel-head">
-            <h3>可选 API（不填则走免费公共接口 / 本地）</h3>
-            <span class="api-badge" id="api-status-badge">未启用 API</span>
-          </div>
-          <p class="hint">
-            <strong>文本翻译</strong>选 DeepSeek / 自定义 OpenAI 兼容时，必须填 Key，失败会直接报错。
-            <strong>图片识别</strong>选 Gemini 或「复杂模式 + Gemini Key」才会调视觉 API。
-            Key 只存在你的浏览器。
-          </p>
+        <!-- ========== Complex API ========== -->
+        <div id="complex-options" class="complex-block hidden">
+          <div class="block-title">API 配置（复杂模式必填）</div>
 
-          <div class="api-block">
-            <div class="api-block-title">DeepSeek / OpenAI 兼容（文本翻译）</div>
+          <div class="options">
+            <label class="field">
+              <span>目标语言</span>
+              <select id="opt-lang-c">
+                <option value="zh-CN" selected>简体中文</option>
+                <option value="zh-TW">繁體中文</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>接口类型</span>
+              <select id="opt-provider">
+                <option value="deepseek" selected>DeepSeek（文本翻译）</option>
+                <option value="openai">OpenAI 兼容（文本翻译）</option>
+                <option value="gemini">Gemini（图片视觉识别）</option>
+              </select>
+            </label>
+            <label class="field checkbox">
+              <input type="checkbox" id="opt-cover-c" checked />
+              <span>覆盖原文后再写中文</span>
+            </label>
+            <label class="field checkbox">
+              <input type="checkbox" id="opt-preserve-codes-c" checked />
+              <span>保留 PMS / 色号 / SKU</span>
+            </label>
+          </div>
+
+          <div class="api-panel">
+            <div class="api-panel-head">
+              <h3>接口设置</h3>
+              <span class="api-badge" id="api-status-badge">未配置</span>
+            </div>
+
             <div class="api-grid">
               <label class="field">
-                <span>API Base URL</span>
-                <input id="opt-llm-base" type="url" placeholder="https://api.deepseek.com" autocomplete="off" spellcheck="false" />
-              </label>
-              <label class="field">
-                <span>模型名</span>
-                <input id="opt-llm-model" type="text" placeholder="deepseek-chat" autocomplete="off" spellcheck="false" />
+                <span>Base URL</span>
+                <input id="opt-base-url" type="url" placeholder="https://api.deepseek.com" autocomplete="off" spellcheck="false" />
               </label>
               <label class="field grow">
                 <span>API Key</span>
-                <input id="opt-llm-key" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+                <input id="opt-api-key" type="password" placeholder="sk-... 或 AIza..." autocomplete="off" spellcheck="false" />
               </label>
             </div>
+
             <div class="api-row">
-              <button type="button" class="btn btn-ghost" id="btn-test-llm">测试 DeepSeek / 兼容接口</button>
-              <span class="muted tiny">
-                <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">DeepSeek 申请 Key</a>
+              <button type="button" class="btn btn-ghost" id="btn-fetch-models">拉取模型列表</button>
+              <button type="button" class="btn btn-ghost" id="btn-test-api">测试连接</button>
+              <span class="muted tiny" id="api-links">
+                <a id="link-key" href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">申请 Key</a>
               </span>
             </div>
-          </div>
 
-          <div class="api-block">
-            <div class="api-block-title">Gemini（图片视觉识别）</div>
-            <div class="api-row">
-              <label class="field grow">
-                <span>Gemini API Key</span>
-                <input id="opt-gemini-key" type="password" placeholder="AIza..." autocomplete="off" spellcheck="false" />
-              </label>
-              <button type="button" class="btn btn-ghost" id="btn-test-key">测试 Gemini</button>
+            <label class="field model-field">
+              <span>模型（可先点「拉取模型列表」）</span>
+              <select id="opt-model">
+                <option value="">— 请先拉取模型列表或手动填写 —</option>
+              </select>
+              <input id="opt-model-custom" type="text" placeholder="或手动输入模型名，如 deepseek-chat" autocomplete="off" spellcheck="false" />
+            </label>
+
+            <p id="api-test-result" class="api-test-result muted"></p>
+
+            <div class="api-note" id="api-note">
+              <strong>DeepSeek：</strong>优化英文→中文译文质量（识别仍用本地切块 OCR）。<br />
+              <strong>Gemini：</strong>直接看图找文字并翻译，适合彩标 / 艺术字。<br />
+              未配置成功时不会静默改用免费接口。
             </div>
-            <p class="hint">
-              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">免费申请 Gemini Key</a>
-            </p>
           </div>
-
-          <p id="api-test-result" class="api-test-result muted"></p>
         </div>
       </section>
 
@@ -150,7 +198,7 @@
           <li data-step="load"><span class="step-dot"></span>加载文件</li>
           <li data-step="extract"><span class="step-dot"></span>提取 / OCR</li>
           <li data-step="translate"><span class="step-dot"></span>翻译为中文</li>
-          <li data-step="compose"><span class="step-dot"></span>生成清晰中文页</li>
+          <li data-step="compose"><span class="step-dot"></span>生成中文页</li>
           <li data-step="done"><span class="step-dot"></span>完成</li>
         </ol>
         <p id="process-log" class="log"></p>
@@ -193,16 +241,15 @@
         </div>
       </section>
 
-      <!-- Empty / error -->
       <section id="panel-error" class="panel error-panel hidden">
-        <h2>无法处理该文件</h2>
+        <h2>无法处理</h2>
         <p id="error-message"></p>
-        <button type="button" class="btn btn-primary" id="btn-error-reset">返回上传</button>
+        <button type="button" class="btn btn-primary" id="btn-error-reset">返回</button>
       </section>
     </main>
 
     <footer class="footer">
-      <p>文字提取与 OCR 在浏览器本地完成；文本翻译会发往所选公共接口。请勿上传含敏感信息的文件。</p>
+      <p>普通模式：本地 OCR + 免费公共翻译，不使用大模型 Key。复杂模式：仅调用你自己填写的 API。</p>
     </footer>
   </div>
 

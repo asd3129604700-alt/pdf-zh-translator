@@ -154,6 +154,120 @@
     return u + "/v1/chat/completions";
   }
 
+  /** GET {base}/models — OpenAI-compatible model list (DeepSeek included). */
+  function modelsEndpoint(baseUrl) {
+    let u = String(baseUrl || "").trim().replace(/\/+$/, "");
+    if (!u) throw new Error("未填写 API Base URL");
+    if (/\/models$/i.test(u)) return u;
+    if (/\/v1$/i.test(u)) return u + "/models";
+    if (/deepseek\.com$/i.test(u)) return u + "/models";
+    return u + "/v1/models";
+  }
+
+  /**
+   * Fetch model IDs from an OpenAI-compatible endpoint.
+   * Returns string[] (sorted). Throws with a clear Chinese message.
+   */
+  async function fetchOpenAIModels(options) {
+    const cfg = openaiConfig(options);
+    if (!cfg.apiKey) throw new Error(cfg.label + " API Key 未填写");
+    const url = modelsEndpoint(cfg.baseUrl || options.llmBaseUrl || "");
+    const ctrl = new AbortController();
+    const timer = setTimeout(function () {
+      ctrl.abort();
+    }, 25000);
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        headers: {
+          Authorization: "Bearer " + cfg.apiKey,
+          "Content-Type": "application/json",
+        },
+        cache: "no-store",
+        signal: ctrl.signal,
+      });
+      const text = await res.text();
+      let parsed = null;
+      try {
+        parsed = text ? JSON.parse(text) : null;
+      } catch (e) {
+        parsed = null;
+      }
+      if (!res.ok) {
+        const detail = apiErrorDetail(parsed, text) || "HTTP " + res.status;
+        throw new Error(cfg.label + " 拉取模型失败：" + detail);
+      }
+      const data = parsed && parsed.data;
+      if (!Array.isArray(data)) {
+        throw new Error(cfg.label + " 模型列表格式无法识别");
+      }
+      const ids = data
+        .map(function (m) {
+          return (m && (m.id || m.name)) || "";
+        })
+        .filter(Boolean);
+      if (!ids.length) throw new Error(cfg.label + " 未返回任何模型");
+      ids.sort();
+      return ids;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Built-in Gemini model list + optional live fetch. */
+  const GEMINI_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+  ];
+
+  async function fetchGeminiModels(apiKey) {
+    if (!apiKey) throw new Error("Gemini API Key 未填写");
+    const url =
+      "https://generativelanguage.googleapis.com/v1beta/models?key=" +
+      encodeURIComponent(apiKey.trim()) +
+      "&pageSize=50";
+    const ctrl = new AbortController();
+    const timer = setTimeout(function () {
+      ctrl.abort();
+    }, 25000);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal, cache: "no-store" });
+      const text = await res.text();
+      let parsed = null;
+      try {
+        parsed = text ? JSON.parse(text) : null;
+      } catch (e) {
+        parsed = null;
+      }
+      if (!res.ok) {
+        const detail = apiErrorDetail(parsed, text) || "HTTP " + res.status;
+        throw new Error("Gemini 拉取模型失败：" + detail);
+      }
+      const models = parsed && parsed.models;
+      if (!Array.isArray(models) || !models.length) {
+        return GEMINI_MODELS.slice();
+      }
+      const ids = models
+        .map(function (m) {
+          // name: "models/gemini-2.0-flash"
+          const n = (m && m.name) || "";
+          return n.replace(/^models\//, "");
+        })
+        .filter(function (id) {
+          return /generateContent|gemini/i.test(id);
+        });
+      return ids.length ? ids : GEMINI_MODELS.slice();
+    } catch (err) {
+      // Fall back to known list if list endpoint is restricted
+      if (/拉取模型失败|Key/.test(err.message || "")) throw err;
+      return GEMINI_MODELS.slice();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   function openaiConfig(options) {
     options = options || {};
     const provider = options.llmProvider || "deepseek";
@@ -603,5 +717,8 @@
     openaiConfig: openaiConfig,
     testOpenAICompatKey: testOpenAICompatKey,
     translateOpenAICompat: translateOpenAICompat,
+    fetchOpenAIModels: fetchOpenAIModels,
+    fetchGeminiModels: fetchGeminiModels,
+    GEMINI_MODELS: GEMINI_MODELS,
   };
 })(window);
