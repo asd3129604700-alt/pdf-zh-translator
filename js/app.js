@@ -13,7 +13,11 @@
     optPreserve: $("#opt-preserve-codes"),
     optImageMode: $("#opt-image-mode"),
     optGeminiKey: $("#opt-gemini-key"),
+    optLlmBase: $("#opt-llm-base"),
+    optLlmModel: $("#opt-llm-model"),
+    optLlmKey: $("#opt-llm-key"),
     btnTestKey: $("#btn-test-key"),
+    btnTestLlm: $("#btn-test-llm"),
     apiTestResult: $("#api-test-result"),
     apiStatusBadge: $("#api-status-badge"),
     panelUpload: $("#panel-upload"),
@@ -390,8 +394,41 @@
       "gemini-whole": "Gemini 整图 API",
       "gemini-tiled": "Gemini 切块 API",
       pdf: "PDF 文字层",
+      deepseek: "DeepSeek 翻译",
+      openai: "OpenAI 兼容翻译",
+      google: "Google 翻译",
+      mymemory: "MyMemory",
+      glossary: "本地词表",
     };
     return map[code] || code || "未知";
+  }
+
+  function currentLlmOptions() {
+    return {
+      llmBaseUrl: ((els.optLlmBase && els.optLlmBase.value) || "").trim(),
+      llmModel: ((els.optLlmModel && els.optLlmModel.value) || "").trim(),
+      llmApiKey: ((els.optLlmKey && els.optLlmKey.value) || "").trim(),
+    };
+  }
+
+  function buildTranslateOptions() {
+    const service = (els.optService && els.optService.value) || "auto";
+    const llm = currentLlmOptions();
+    const opts = {
+      target: els.optLang.value,
+      service: service,
+      preserveCodes: els.optPreserve.checked,
+      llmProvider: service === "openai" ? "openai" : "deepseek",
+      llmBaseUrl: llm.llmBaseUrl,
+      llmModel: llm.llmModel,
+      llmApiKey: llm.llmApiKey,
+    };
+    // Defaults when using DeepSeek preset
+    if (service === "deepseek") {
+      if (!opts.llmBaseUrl) opts.llmBaseUrl = "https://api.deepseek.com";
+      if (!opts.llmModel) opts.llmModel = "deepseek-chat";
+    }
+    return opts;
   }
 
   async function handleFiles(files) {
@@ -399,11 +436,13 @@
 
     const imageMode = (els.optImageMode && els.optImageMode.value) || "ocr";
     const geminiKey = ((els.optGeminiKey && els.optGeminiKey.value) || "").trim();
+    const service = (els.optService && els.optService.value) || "auto";
+    const llm = currentLlmOptions();
     const images = files.filter(function (f) {
       return IMAGE_RE.test(f.name) || (f.type || "").startsWith("image/");
     });
 
-    // Intercept: API modes require a key — no silent local fallback
+    // Intercept: API modes require a key — no silent fallback
     if (images.length && imageMode === "gemini" && !geminiKey) {
       fail(
         "已选择「Gemini 整图视觉」，但未填写 API Key。\n" +
@@ -415,6 +454,23 @@
       fail("Gemini API Key 看起来不正确（太短）。请检查后重试，或改用本地模式。");
       return;
     }
+    if ((service === "deepseek" || service === "openai") && !llm.llmApiKey) {
+      fail(
+        "已选择「" +
+          (service === "deepseek" ? "DeepSeek" : "自定义 OpenAI 兼容") +
+          "」文本翻译，但未填写 API Key。\n" +
+          "请在下方 API 面板填入 Key，或改回「自动（Google / MyMemory）」。"
+      );
+      return;
+    }
+    if ((service === "deepseek" || service === "openai") && llm.llmApiKey.length < 10) {
+      fail("文本翻译 API Key 看起来不正确（太短）。请检查后重试。");
+      return;
+    }
+    if (service === "openai" && !llm.llmBaseUrl) {
+      fail("选择了「自定义 OpenAI 兼容」，请填写 API Base URL（例如 https://api.deepseek.com）。");
+      return;
+    }
 
     showPanel("process");
     setStep("load");
@@ -423,11 +479,7 @@
       return f.name;
     }).join("、");
 
-    const options = {
-      target: els.optLang.value,
-      service: els.optService.value,
-      preserveCodes: els.optPreserve.checked,
-    };
+    const options = buildTranslateOptions();
     const cover = els.optCover.checked;
 
     state.pages = [];
@@ -530,6 +582,17 @@
         " 条文本 · 目标 " +
         (els.optLang.value === "zh-TW" ? "繁體中文" : "简体中文") +
         (uniq.length ? " · 识别：" + uniq.join(" + ") : "") +
+        (options.service === "deepseek"
+          ? " · 译文：DeepSeek"
+          : options.service === "openai"
+            ? " · 译文：OpenAI 兼容"
+            : options.service === "google"
+              ? " · 译文：Google"
+              : options.service === "mymemory"
+                ? " · 译文：MyMemory"
+                : options.service === "dict"
+                  ? " · 译文：本地词表"
+                  : "") +
         (emptyCount ? " · " + emptyCount + " 页无文字" : "");
       state.pageIndex = 0;
       state.showOriginal = false;
@@ -633,32 +696,135 @@
     }
   });
 
+  if (els.optService) {
+    els.optService.addEventListener("change", function () {
+      // Prefill DeepSeek defaults when selected
+      if (els.optService.value === "deepseek") {
+        if (els.optLlmBase && !els.optLlmBase.value.trim())
+          els.optLlmBase.placeholder = "https://api.deepseek.com";
+        if (els.optLlmModel && !els.optLlmModel.value.trim())
+          els.optLlmModel.placeholder = "deepseek-chat";
+      }
+      updateApiBadge();
+    });
+  }
+
+  function persistLlm() {
+    try {
+      localStorage.setItem("pdfzh_llm_base", (els.optLlmBase && els.optLlmBase.value) || "");
+      localStorage.setItem("pdfzh_llm_model", (els.optLlmModel && els.optLlmModel.value) || "");
+      localStorage.setItem("pdfzh_llm_key", (els.optLlmKey && els.optLlmKey.value) || "");
+    } catch (e) { /* ignore */ }
+    updateApiBadge();
+  }
+  ["optLlmBase", "optLlmModel", "optLlmKey"].forEach(function (name) {
+    const el = els[name];
+    if (!el) return;
+    el.addEventListener("change", persistLlm);
+    el.addEventListener("input", updateApiBadge);
+  });
+
+  if (els.btnTestLlm) {
+    els.btnTestLlm.addEventListener("click", async function () {
+      const out = els.apiTestResult;
+      if (!out) return;
+      out.classList.remove("ok", "err");
+      const service = (els.optService && els.optService.value) || "auto";
+      const provider = service === "openai" ? "openai" : "deepseek";
+      const llm = currentLlmOptions();
+      if (!llm.llmApiKey) {
+        out.textContent = "请先填写 DeepSeek / OpenAI 兼容 API Key，再点测试。";
+        out.classList.add("err");
+        return;
+      }
+      if (provider === "openai" && !llm.llmBaseUrl) {
+        out.textContent = "自定义 OpenAI 兼容需要填写 Base URL。";
+        out.classList.add("err");
+        return;
+      }
+      out.textContent = "正在请求 " + (provider === "openai" ? "OpenAI 兼容" : "DeepSeek") + " 接口…";
+      els.btnTestLlm.disabled = true;
+      try {
+        const r = await PdfTranslator.testOpenAICompatKey({
+          llmProvider: provider,
+          llmBaseUrl: llm.llmBaseUrl,
+          llmModel: llm.llmModel,
+          llmApiKey: llm.llmApiKey,
+        });
+        out.textContent =
+          r.label +
+          " Key 有效，已成功调用（模型 " +
+          r.model +
+          " · " +
+          r.endpoint +
+          "）。";
+        out.classList.add("ok");
+      } catch (err) {
+        out.textContent =
+          "调用失败：" + (err && err.message ? err.message : err);
+        out.classList.add("err");
+      } finally {
+        els.btnTestLlm.disabled = false;
+        updateApiBadge();
+      }
+    });
+  }
+
   // Persist image-mode prefs locally
   try {
     const savedKey = localStorage.getItem("pdfzh_gemini_key") || "";
     const savedMode = localStorage.getItem("pdfzh_image_mode") || "ocr";
     if (els.optGeminiKey && savedKey) els.optGeminiKey.value = savedKey;
     if (els.optImageMode && savedMode) els.optImageMode.value = savedMode;
+    if (els.optLlmBase) els.optLlmBase.value = localStorage.getItem("pdfzh_llm_base") || "";
+    if (els.optLlmModel) els.optLlmModel.value = localStorage.getItem("pdfzh_llm_model") || "";
+    if (els.optLlmKey) els.optLlmKey.value = localStorage.getItem("pdfzh_llm_key") || "";
   } catch (e) { /* private mode */ }
 
   function updateApiBadge() {
     if (!els.apiStatusBadge || !els.optImageMode) return;
     const mode = els.optImageMode.value;
+    const service = (els.optService && els.optService.value) || "auto";
     const key = ((els.optGeminiKey && els.optGeminiKey.value) || "").trim();
+    const llmKey = ((els.optLlmKey && els.optLlmKey.value) || "").trim();
+    const parts = [];
+    let warn = false;
+
+    if (service === "deepseek") {
+      parts.push(llmKey ? "DeepSeek 译文" : "DeepSeek 需 Key");
+      if (!llmKey) warn = true;
+    } else if (service === "openai") {
+      parts.push(llmKey ? "OpenAI 兼容译文" : "OpenAI 兼容需 Key");
+      if (!llmKey) warn = true;
+    } else if (service === "auto" || service === "google" || service === "mymemory") {
+      parts.push("公共翻译接口");
+    } else {
+      parts.push("本地词表");
+    }
+
     els.apiStatusBadge.classList.remove("on", "warn");
     if (mode === "gemini" && !key) {
-      els.apiStatusBadge.textContent = "需要 Key（未填）";
-      els.apiStatusBadge.classList.add("warn");
+      parts.push("Gemini 需 Key");
+      warn = true;
     } else if (mode === "gemini" && key) {
-      els.apiStatusBadge.textContent = "将调用 Gemini 整图 API";
-      els.apiStatusBadge.classList.add("on");
+      parts.push("Gemini 整图 API");
     } else if (mode === "complex" && key) {
-      els.apiStatusBadge.textContent = "将调用 Gemini 切块 API";
-      els.apiStatusBadge.classList.add("on");
+      parts.push("Gemini 切块 API");
     } else if (mode === "complex") {
-      els.apiStatusBadge.textContent = "本地切块 OCR（未填 Key）";
+      parts.push("本地切块 OCR");
     } else {
-      els.apiStatusBadge.textContent = "本地 OCR（不调 API）";
+      parts.push("本地 OCR");
+    }
+
+    els.apiStatusBadge.textContent = parts.join(" · ");
+    if (warn) els.apiStatusBadge.classList.add("warn");
+    else if (
+      service === "deepseek" ||
+      service === "openai" ||
+      mode === "gemini" ||
+      (mode === "complex" && key)
+    ) {
+      els.apiStatusBadge.classList.add("on");
     }
   }
 

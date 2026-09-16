@@ -141,6 +141,240 @@
     return String(translated).trim();
   }
 
+  /** Normalize OpenAI-compatible base URL → chat/completions endpoint */
+  function openaiEndpoint(baseUrl) {
+    let u = String(baseUrl || "").trim().replace(/\/+$/, "");
+    if (!u) throw new Error("未填写 API Base URL");
+    if (/\/chat\/completions$/i.test(u)) return u;
+    if (/\/v1$/i.test(u)) return u + "/chat/completions";
+    return u + "/v1/chat/completions";
+  }
+
+  function openaiConfig(options) {
+    options = options || {};
+    const provider = options.llmProvider || "deepseek";
+    let baseUrl = options.llmBaseUrl || "";
+    let model = options.llmModel || "";
+    let label = provider;
+
+    if (provider === "deepseek") {
+      if (!baseUrl) baseUrl = "https://api.deepseek.com";
+      if (!model) model = "deepseek-chat";
+      label = "DeepSeek";
+    } else if (provider === "openai") {
+      if (!baseUrl) baseUrl = "https://api.openai.com";
+      if (!model) model = "gpt-4o-mini";
+      label = "OpenAI";
+    }
+    return {
+      endpoint: openaiEndpoint(baseUrl),
+      apiKey: (options.llmApiKey || "").trim(),
+      model: model,
+      label: label,
+      provider: provider,
+    };
+  }
+
+  /**
+   * OpenAI-compatible chat translate (DeepSeek / custom).
+   * options: { target, llmProvider, llmBaseUrl, llmApiKey, llmModel }
+   */
+  async function translateOpenAICompat(text, options) {
+    const cfg = openaiConfig(options);
+    if (!cfg.apiKey) throw new Error(cfg.label + " API Key 未填写");
+    const langName =
+      (options && options.target) === "zh-TW" ? "繁體中文" : "简体中文";
+
+    const ctrl = new AbortController();
+    const timer = setTimeout(function () {
+      ctrl.abort();
+    }, 60000);
+    try {
+      const res = await fetch(cfg.endpoint, {
+        method: "POST",
+        signal: ctrl.signal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + cfg.apiKey,
+        },
+        body: JSON.stringify({
+          model: cfg.model,
+          temperature: 0.1,
+          messages: [
+            {
+              role: "system",
+              content:
+                "你是专业产品规格/文档译者。把用户给出的英文准确翻译成" +
+                langName +
+                "。保留数字、单位、色号（如 PMS 361 C）、SKU。只输出译文，不要解释。",
+            },
+            { role: "user", content: text },
+          ],
+        }),
+      });
+      const json = await res.json().catch(function () {
+        return null;
+      });
+      if (!res.ok) {
+        const msg =
+          (json && json.error && json.error.message) || "HTTP " + res.status;
+        const err = new Error(cfg.label + " API 调用失败：" + msg);
+        err.status = res.status;
+        throw err;
+      }
+      const out =
+        json &&
+        json.choices &&
+        json.choices[0] &&
+        json.choices[0].message &&
+        json.choices[0].message.content;
+      if (!out) throw new Error(cfg.label + " 返回空内容");
+      return String(out).trim();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Batch translate many strings in one DeepSeek/OpenAI call (JSON array in/out). */
+  async function translateOpenAICompatBatch(texts, options, onProgress) {
+    const cfg = openaiConfig(options);
+    if (!cfg.apiKey) throw new Error(cfg.label + " API Key 未填写");
+    const langName =
+      (options && options.target) === "zh-TW" ? "繁體中文" : "简体中文";
+    const chunkSize = 24;
+    const out = new Array(texts.length);
+
+    for (let start = 0; start < texts.length; start += chunkSize) {
+      const chunk = texts.slice(start, start + chunkSize);
+      const indexed = chunk.map(function (t, i) {
+        return { id: start + i, text: t };
+      });
+      const user =
+        "把下列英文条目翻译成" +
+        langName +
+        "。返回 JSON 数组，每项 {\"id\":数字,\"translation\":\"译文\"}。" +
+        "保留数字/单位/PMS色号/SKU。不要输出其它文字。\n" +
+        JSON.stringify(indexed);
+
+      const ctrl = new AbortController();
+      const timer = setTimeout(function () {
+        ctrl.abort();
+      }, 90000);
+      let json = null;
+      let res = null;
+      try {
+        res = await fetch(cfg.endpoint, {
+          method: "POST",
+          signal: ctrl.signal,
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer " + cfg.apiKey,
+          },
+          body: JSON.stringify({
+            model: cfg.model,
+            temperature: 0.1,
+            messages: [
+              {
+                role: "system",
+                content:
+                  "你是 JSON 翻译接口。只输出合法 JSON 数组，不要 markdown。",
+              },
+              { role: "user", content: user },
+            ],
+          }),
+        });
+        json = await res.json().catch(function () {
+          return null;
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      if (!res || !res.ok) {
+        const msg =
+          (json && json.error && json.error.message) ||
+          (res ? "HTTP " + res.status : "网络错误");
+        const err = new Error(cfg.label + " API 调用失败：" + msg);
+        err.status = res && res.status;
+        throw err;
+      }
+      const content =
+        json &&
+        json.choices &&
+        json.choices[0] &&
+        json.choices[0].message &&
+        json.choices[0].message.content;
+      let arr = null;
+      try {
+        arr = JSON.parse(content);
+      } catch (e) {
+        const m = String(content || "").match(/\[[\s\S]*\]/);
+        if (m) {
+          try {
+            arr = JSON.parse(m[0]);
+          } catch (e2) {
+            arr = null;
+          }
+        }
+      }
+      if (!Array.isArray(arr)) {
+        // fallback: per-item
+        for (let i = 0; i < chunk.length; i++) {
+          out[start + i] = await translateOpenAICompat(chunk[i], options);
+          if (onProgress) onProgress(start + i + 1, texts.length);
+        }
+        continue;
+      }
+      const byId = {};
+      for (let i = 0; i < arr.length; i++) {
+        if (arr[i] && typeof arr[i].id === "number") {
+          byId[arr[i].id] = arr[i].translation || arr[i].text || "";
+        }
+      }
+      for (let i = 0; i < chunk.length; i++) {
+        const id = start + i;
+        out[id] = byId[id] != null ? String(byId[id]).trim() : chunk[i];
+        if (onProgress) onProgress(id + 1, texts.length);
+      }
+    }
+    return out;
+  }
+
+  /** Quick DeepSeek/OpenAI key check. */
+  async function testOpenAICompatKey(options) {
+    const cfg = openaiConfig(options);
+    if (!cfg.apiKey) throw new Error("未填写 " + cfg.label + " API Key");
+    const ctrl = new AbortController();
+    const timer = setTimeout(function () {
+      ctrl.abort();
+    }, 30000);
+    try {
+      const res = await fetch(cfg.endpoint, {
+        method: "POST",
+        signal: ctrl.signal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + cfg.apiKey,
+        },
+        body: JSON.stringify({
+          model: cfg.model,
+          max_tokens: 8,
+          messages: [{ role: "user", content: "ping" }],
+        }),
+      });
+      const json = await res.json().catch(function () {
+        return null;
+      });
+      if (!res.ok) {
+        const msg =
+          (json && json.error && json.error.message) || "HTTP " + res.status;
+        throw new Error(cfg.label + " API 调用失败：" + msg);
+      }
+      return { ok: true, label: cfg.label, model: cfg.model, endpoint: cfg.endpoint };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function translateOne(text, options) {
     options = options || {};
     const raw = String(text || "").trim();
@@ -177,10 +411,22 @@
       mymemory: function () {
         return translateMyMemory(payload, target);
       },
+      deepseek: function () {
+        return translateOpenAICompat(payload, options);
+      },
+      openai: function () {
+        return translateOpenAICompat(payload, options);
+      },
     };
 
     const order =
-      service === "auto" ? ["google", "mymemory"] : service === "dict" ? [] : [service];
+      service === "auto"
+        ? ["google", "mymemory"]
+        : service === "dict"
+          ? []
+          : service === "deepseek" || service === "openai"
+            ? [service]
+            : [service];
 
     let lastErr = null;
     for (let n = 0; n < order.length; n++) {
@@ -225,6 +471,30 @@
       }
     }
 
+    // Fast path: DeepSeek / OpenAI-compatible batch API
+    const svc = options.service || "auto";
+    if ((svc === "deepseek" || svc === "openai") && unique.length) {
+      let batchOut;
+      try {
+        batchOut = await translateOpenAICompatBatch(unique, options, onProgress);
+      } catch (err) {
+        // Hard fail — do not silently fall back to Google
+        throw err;
+      }
+      const byText = {};
+      for (let i = 0; i < unique.length; i++) {
+        let dst = batchOut[i] || unique[i];
+        if (options.preserveCodes !== false) dst = applyGlossary(dst);
+        dst = dst.replace(/\s+([，。；：！？、])/g, "$1").trim();
+        byText[unique[i]] = { src: unique[i], dst: dst, service: svc };
+      }
+      return texts.map(function (t) {
+        const raw = String(t || "").trim();
+        if (!raw) return { src: raw, dst: "", service: "skip" };
+        return byText[raw];
+      });
+    }
+
     const results = new Array(unique.length);
     let done = 0;
     const concurrency = Math.min(4, Math.max(1, unique.length));
@@ -254,5 +524,8 @@
     translateOne: translateOne,
     translateMany: translateMany,
     applyGlossary: applyGlossary,
+    openaiConfig: openaiConfig,
+    testOpenAICompatKey: testOpenAICompatKey,
+    translateOpenAICompat: translateOpenAICompat,
   };
 })(window);

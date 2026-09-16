@@ -235,6 +235,30 @@ html, body {
   background: #fdf0ea;
 }
 
+.api-block {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+.api-block-title {
+  font-size: 0.86rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--ink);
+}
+.api-grid {
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr 1.2fr;
+  gap: 10px;
+}
+.api-grid .field {
+  margin-top: 0;
+  max-width: none;
+}
+.tiny {
+  font-size: 0.8rem;
+}
+
 .options {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

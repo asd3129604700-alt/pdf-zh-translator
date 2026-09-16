@@ -61,6 +61,8 @@
               <option value="auto" selected>自动（Google / MyMemory）</option>
               <option value="google">Google 翻译</option>
               <option value="mymemory">MyMemory</option>
+              <option value="deepseek">DeepSeek（OpenAI 兼容）</option>
+              <option value="openai">自定义 OpenAI 兼容</option>
               <option value="dict">仅词表对照（不调 API）</option>
             </select>
           </label>
@@ -84,23 +86,53 @@
 
         <div class="api-panel">
           <div class="api-panel-head">
-            <h3>可选 API（不填则完全走本地）</h3>
+            <h3>可选 API（不填则走免费公共接口 / 本地）</h3>
             <span class="api-badge" id="api-status-badge">未启用 API</span>
           </div>
           <p class="hint">
-            默认本地 OCR，无需 Key。选「复杂图片模式」会切成 2/4 块放大识别。
-            <strong>若填了 Key：复杂模式 = 每块调 Gemini；「Gemini 整图视觉」= 整图 1 次调用。</strong>
-            <strong>选了 API 模式但没填 Key、或 Key 错误，会直接报错，不会悄悄改用本地。</strong>
+            <strong>文本翻译</strong>选 DeepSeek / 自定义 OpenAI 兼容时，必须填 Key，失败会直接报错。
+            <strong>图片识别</strong>选 Gemini 或「复杂模式 + Gemini Key」才会调视觉 API。
             Key 只存在你的浏览器。
-            <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">免费申请 Key</a>
           </p>
-          <div class="api-row">
-            <label class="field grow">
-              <span>Gemini API Key</span>
-              <input id="opt-gemini-key" type="password" placeholder="AIza..." autocomplete="off" spellcheck="false" />
-            </label>
-            <button type="button" class="btn btn-ghost" id="btn-test-key">测试 Key</button>
+
+          <div class="api-block">
+            <div class="api-block-title">DeepSeek / OpenAI 兼容（文本翻译）</div>
+            <div class="api-grid">
+              <label class="field">
+                <span>API Base URL</span>
+                <input id="opt-llm-base" type="url" placeholder="https://api.deepseek.com" autocomplete="off" spellcheck="false" />
+              </label>
+              <label class="field">
+                <span>模型名</span>
+                <input id="opt-llm-model" type="text" placeholder="deepseek-chat" autocomplete="off" spellcheck="false" />
+              </label>
+              <label class="field grow">
+                <span>API Key</span>
+                <input id="opt-llm-key" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+              </label>
+            </div>
+            <div class="api-row">
+              <button type="button" class="btn btn-ghost" id="btn-test-llm">测试 DeepSeek / 兼容接口</button>
+              <span class="muted tiny">
+                <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">DeepSeek 申请 Key</a>
+              </span>
+            </div>
           </div>
+
+          <div class="api-block">
+            <div class="api-block-title">Gemini（图片视觉识别）</div>
+            <div class="api-row">
+              <label class="field grow">
+                <span>Gemini API Key</span>
+                <input id="opt-gemini-key" type="password" placeholder="AIza..." autocomplete="off" spellcheck="false" />
+              </label>
+              <button type="button" class="btn btn-ghost" id="btn-test-key">测试 Gemini</button>
+            </div>
+            <p class="hint">
+              <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">免费申请 Gemini Key</a>
+            </p>
+          </div>
+
           <p id="api-test-result" class="api-test-result muted"></p>
         </div>
       </section>
