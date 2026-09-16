@@ -67,9 +67,9 @@
           <label class="field">
             <span>图片识别</span>
             <select id="opt-image-mode">
-              <option value="ocr" selected>本地 OCR（快速）</option>
+              <option value="ocr" selected>本地 OCR（快速，无需 Key）</option>
               <option value="complex">复杂图片模式（切块放大）</option>
-              <option value="gemini">Gemini 视觉 API（自备 Key）</option>
+              <option value="gemini">Gemini 整图视觉（自备 Key）</option>
             </select>
           </label>
           <label class="field checkbox">
@@ -88,10 +88,11 @@
             <span class="api-badge">可选</span>
           </div>
           <p class="hint">
-            默认本地 OCR，无需 Key。复杂规格图 / 小字可选「复杂图片模式」（切成 2 或 4 块再放大识别）。
-            更难的彩标图可自备
-            <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">Gemini API Key</a>。
+            默认本地 OCR，无需 Key。选「复杂图片模式」会切成 2/4 块放大识别；
+            <strong>若同时填了 Gemini Key，复杂模式会自动改为「每块走 API」</strong>，密图小字通常更准（约 2–4 次调用）。
+            「Gemini 整图视觉」只调 1 次，适合中等复杂度。
             Key 只存在你的浏览器，不会上传到本站。
+            <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer">免费申请 Key</a>
           </p>
           <label class="field">
             <span>Gemini API Key（仅图片模式选 Gemini 时需要）</span>

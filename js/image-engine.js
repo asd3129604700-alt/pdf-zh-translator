@@ -764,6 +764,98 @@
     return lines;
   }
 
+  /**
+   * Complex + API: split into 2/4 tiles, call Gemini per tile, map boxes back.
+   * Better than whole-image Gemini on dense specs; more API calls (2–4).
+   */
+  async function geminiExtractLinesTiled(imageCanvas, targetLang, apiKey, onProgress) {
+    if (!apiKey) throw new Error("未配置 Gemini API Key");
+    const W = imageCanvas.width;
+    const H = imageCanvas.height;
+    const long = Math.max(W, H);
+
+    let cols = 2;
+    let rows = 1;
+    if (W > H * 1.15) {
+      cols = 2;
+      rows = 1;
+    } else if (H > W * 1.15) {
+      cols = 1;
+      rows = 2;
+    } else {
+      cols = 2;
+      rows = 2;
+    }
+    if (long >= 1400) {
+      cols = 2;
+      rows = 2;
+    }
+
+    const overlap = Math.round(Math.min(W / cols, H / rows) * 0.06);
+    const tileW = Math.ceil(W / cols);
+    const tileH = Math.ceil(H / rows);
+    const total = cols * rows;
+    let done = 0;
+    let all = [];
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const x0 = Math.max(0, Math.floor(c * tileW) - (c > 0 ? overlap : 0));
+        const y0 = Math.max(0, Math.floor(r * tileH) - (r > 0 ? overlap : 0));
+        const x1 = Math.min(W, Math.floor((c + 1) * tileW) + (c < cols - 1 ? overlap : 0));
+        const y1 = Math.min(H, Math.floor((r + 1) * tileH) + (r < rows - 1 ? overlap : 0));
+        const tw = x1 - x0;
+        const th = y1 - y0;
+        if (tw < 16 || th < 16) continue;
+
+        if (onProgress) {
+          onProgress({
+            status: "gemini_tile_" + (done + 1) + "_of_" + total,
+            progress: 0.05 + (done / total) * 0.9,
+          });
+        }
+
+        let tile = document.createElement("canvas");
+        tile.width = tw;
+        tile.height = th;
+        tile.getContext("2d").drawImage(imageCanvas, x0, y0, tw, th, 0, 0, tw, th);
+        // Mild upscale helps tiny labels in the API payload
+        if (Math.max(tw, th) < 900) {
+          tile = upscaleCanvas(tile, 1.6);
+        }
+
+        let tileLines = [];
+        try {
+          tileLines = await geminiExtractLines(tile, targetLang, apiKey);
+        } catch (err) {
+          console.warn("Gemini tile failed", done + 1, err);
+          tileLines = [];
+        }
+
+        // tile coords → full image (tile may be upscaled)
+        const inv = tw / tile.width;
+        for (let i = 0; i < tileLines.length; i++) {
+          const L = tileLines[i];
+          all.push({
+            x: x0 + L.x * inv,
+            y: y0 + L.y * inv,
+            w: L.w * inv,
+            h: L.h * inv,
+            fontHeight: L.fontHeight * inv,
+            text: L.text,
+            parts: [],
+            conf: 92,
+            translation: L.translation || "",
+          });
+        }
+        done++;
+      }
+    }
+
+    all = mergeLineLists([], all);
+    return all;
+  }
+
   async function terminateWorker() {
     if (workerPromise) {
       try {
@@ -782,6 +874,7 @@
     ocrCanvasComplex: ocrCanvasComplex,
     overlayLines: overlayLines,
     geminiExtractLines: geminiExtractLines,
+    geminiExtractLinesTiled: geminiExtractLinesTiled,
     applyLocalGlossary: applyLocalGlossary,
     terminateWorker: terminateWorker,
   };

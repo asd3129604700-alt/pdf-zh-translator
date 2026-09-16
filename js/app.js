@@ -255,6 +255,7 @@
       (els.optGeminiKey && els.optGeminiKey.value || "").trim();
 
     if (imageMode === "gemini" && geminiKey) {
+      // Whole-image Gemini (fast, 1 API call)
       if (onOcrProgress) onOcrProgress({ status: "gemini_vision", progress: 0.2 });
       try {
         lines = await ImageEngine.geminiExtractLines(
@@ -273,8 +274,29 @@
     }
 
     if (!lines || !lines.length) {
+      if (imageMode === "complex" && geminiKey) {
+        // Complex + API: tile × Gemini (2–4 calls, better on dense specs)
+        if (onOcrProgress)
+          onOcrProgress({ status: "complex_gemini_start", progress: 0.1 });
+        try {
+          lines = await ImageEngine.geminiExtractLinesTiled(
+            original,
+            options.target || "zh-CN",
+            geminiKey,
+            onOcrProgress
+          );
+          pretranslated = true;
+        } catch (err) {
+          console.warn("Tiled Gemini failed, fall back to local tiled OCR:", err);
+          lines = null;
+          pretranslated = false;
+        }
+      }
+    }
+
+    if (!lines || !lines.length) {
       if (imageMode === "complex") {
-        // Split into 2/4 tiles, upscale ~200%, OCR each, map back
+        // Local tiled OCR (no key needed)
         const ocr = await ImageEngine.ocrCanvasComplex(
           loaded.canvas,
           onOcrProgress,
