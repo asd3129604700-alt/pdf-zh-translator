@@ -159,6 +159,8 @@
     [/\bPlease dye gradient on soft boa\b/gi, "请在柔软仿毛皮上做渐变染色"],
     [/\bPlease dye gradient on\b/gi, "请做渐变染色"],
     [/\bsoft boa\b/gi, "柔软仿毛皮"],
+    [/\bShoes\b/gi, "鞋子"],
+    [/\bhoes\b/gi, "鞋子"],
     [/\bPLAY PATTERN\b/gi, "规格类型"],
     [/\bPRODUCT TITLE\b/gi, "产品名称"],
     [/\bPRODUCT DIMS\b/gi, "产品尺寸"],
@@ -288,6 +290,18 @@
     }
     // Low vowel ratio nonsense (e.g. "CAINS" is ok, "RADIEN" borderline; "iY7" caught above)
     if (lettersOnly.length >= 5 && vowels === 0) return true;
+    // Random short OCR junk like "Arm A mon", "Ba. AM", "N whe", "LEE EN"
+    if (lettersOnly.length <= 8 && vowels === 0) return true;
+    const words = s.split(/\s+/).filter(Boolean);
+    if (words.length <= 3 && lettersOnly.length <= 12) {
+      const vowelRatio = vowels / Math.max(1, lettersOnly.length);
+      // Nonsense short fragments (not product codes)
+      if (!/PMS|SKU|SP\s|HOLOLIVE|SEPARATE|EMBROIDERY|APPLIQU|PRINTED|GRADIENT|MATERIAL|HAIR/i.test(s) &&
+          vowelRatio < 0.28 &&
+          !/^\d/.test(s)) {
+        return true;
+      }
+    }
     // Mixed digit+letter fragments that aren't product codes
     if (/\d/.test(s) && /[A-Za-z]/.test(s) && !/PMS|SKU|SP\s*\d|^\d/i.test(s)) {
       // allow things like 4.5" Mini, 11227J
@@ -613,26 +627,21 @@
   }
 
   /**
-   * Complex mode (region-based):
-   * 1) Probe whole image (downscaled) to find text line boxes
-   * 2) Merge nearby boxes into text regions
-   * 3) Crop each region, upscale ~2×, OCR at high zoom
-   * 4) Map boxes back to full-image coordinates
-   * No fixed 2×2 tiling — only zoom into where text actually is.
+   * Multi-scale probe: find text boxes more reliably on dense product specs.
    */
-  async function ocrCanvasComplex(canvas, onProgress, opts) {
-    opts = opts || {};
-    const worker = await getWorker(onProgress);
-    const W = canvas.width;
-    const H = canvas.height;
+  async function probeTextLines(worker, canvas, W, H) {
+    const scales = [];
+    const base = Math.min(1, 1600 / Math.max(W, H));
+    scales.push(base);
+    if (base < 0.7) scales.push(Math.min(1, base * 1.45));
+    if (Math.max(W, H) >= 2000) scales.push(Math.min(1, 2200 / Math.max(W, H)));
 
-    // --- Pass 1: coarse detect text locations ---
-    if (onProgress) onProgress({ status: "detect_text_boxes", progress: 0.04 });
-    let probeLines = [];
-    try {
-      const probeScale = Math.min(1, 1800 / Math.max(W, H));
+    let all = [];
+    for (let si = 0; si < scales.length; si++) {
+      const probeScale = scales[si];
       const pw = Math.max(80, Math.round(W * probeScale));
       const ph = Math.max(80, Math.round(H * probeScale));
+      if (pw * ph > 4_500_000) continue;
       const probe = document.createElement("canvas");
       probe.width = pw;
       probe.height = ph;
@@ -643,11 +652,11 @@
       const probeOcr = makeOcrCanvas(probe);
       const probeRes = await worker.recognize(probeOcr);
       const inv = 1 / probeScale;
-      probeLines = extractLinesFromResult(
+      const lines = extractLinesFromResult(
         probeRes && probeRes.data,
         pw,
         ph,
-        28
+        si === 0 ? 30 : 26
       ).map(function (l) {
         return {
           x: l.x * inv,
@@ -658,12 +667,104 @@
           conf: l.conf,
         };
       });
+      all = mergeLineLists(all, lines);
+    }
+    return all;
+  }
+
+  /**
+   * Reconstruct paragraph text from stacked OCR line fragments.
+   * (CS comments: multi-line English notes under photos)
+   */
+  function reconstructParagraphs(lines, W, H) {
+    if (!lines || lines.length < 2) return lines || [];
+    const items = lines.slice().sort(function (a, b) {
+      if (Math.abs(a.y - b.y) > Math.max(6, a.h * 0.5)) return a.y - b.y;
+      return a.x - b.x;
+    });
+    const used = new Array(items.length).fill(false);
+    const out = [];
+
+    for (let i = 0; i < items.length; i++) {
+      if (used[i]) continue;
+      used[i] = true;
+      let block = {
+        x: items[i].x,
+        y: items[i].y,
+        w: items[i].w,
+        h: items[i].h,
+        fontHeight: items[i].fontHeight,
+        text: items[i].text,
+        conf: items[i].conf,
+        parts: [items[i]],
+      };
+
+      // Merge next lines that look like continuation of same paragraph
+      for (let j = i + 1; j < items.length && j < i + 8; j++) {
+        if (used[j]) continue;
+        const b = items[j];
+        const gapY = b.y - (block.y + block.h);
+        if (gapY < -2 || gapY > Math.max(28, block.fontHeight * 1.6)) continue;
+        // Left edges roughly aligned (wrapped paragraph)
+        const leftDiff = Math.abs(b.x - block.x);
+        const indentOk = leftDiff < Math.max(40, block.w * 0.12);
+        // Or short fragment continuing on same visual row
+        const sameRow = gapY < block.fontHeight * 0.55 && b.x < block.x + block.w + 30;
+        if (!indentOk && !sameRow) continue;
+        // Avoid merging two bold titles / separate callouts
+        if (block.text.length > 12 && /^[A-Z0-9\W]{0,4}$/.test(b.text)) continue;
+        // Don't glue independent ALL-CAPS callout titles into a paragraph
+        const isCapsLabel = /^[A-Z][A-Z\s\/&\-]{2,}$/.test(b.text) && b.text.length < 40;
+        const blockIsCaps = /^[A-Z][A-Z\s\/&\-]{2,}$/.test(block.text) && block.text.length < 40;
+        if (isCapsLabel || blockIsCaps) continue;
+        // Same for short title-like first lines
+        if (/^(APPLIQUE|EMBROIDERY|SEPARATE PIECE|PRINTED GRAPHIC|MATERIAL SPEC|HAIR)/i.test(b.text) &&
+            b.text.length < 50) {
+          continue;
+        }
+
+        used[j] = true;
+        block.parts.push(b);
+        block.x = Math.min(block.x, b.x);
+        block.y = Math.min(block.y, b.y);
+        block.w = Math.max(block.x + block.w, b.x + b.w) - block.x;
+        block.h = Math.max(block.y + block.h, b.y + b.h) - block.y;
+        block.fontHeight = Math.max(block.fontHeight, b.fontHeight);
+        block.parts.sort(function (p, q) {
+          return p.y - q.y || p.x - q.x;
+        });
+        block.text = block.parts
+          .map(function (p) {
+            return p.text;
+          })
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+      }
+      out.push(block);
+    }
+    return out;
+  }
+
+  /**
+   * Complex mode (region-based, no fixed 2/4 tiles):
+   * probe → cluster regions → zoom-OCR each → full rescue → paragraph rebuild.
+   */
+  async function ocrCanvasComplex(canvas, onProgress, opts) {
+    opts = opts || {};
+    const worker = await getWorker(onProgress);
+    const W = canvas.width;
+    const H = canvas.height;
+
+    if (onProgress) onProgress({ status: "detect_text_boxes", progress: 0.03 });
+    let probeLines = [];
+    try {
+      probeLines = await probeTextLines(worker, canvas, W, H);
     } catch (e) {
       console.warn("probe failed", e);
       probeLines = [];
     }
 
-    // Fallback: if probe found nothing, treat whole image as one region
     let regions = [];
     if (probeLines.length) {
       regions = clusterTextRegions(probeLines, W, H);
@@ -674,12 +775,12 @@
     if (onProgress) {
       onProgress({
         status: "found_" + regions.length + "_text_regions",
-        progress: 0.12,
+        progress: 0.1,
       });
     }
 
-    const zoom = opts.zoom || 2.2;
-    const maxRegions = opts.maxRegions || 48;
+    const zoom = opts.zoom || 2.4;
+    const maxRegions = opts.maxRegions || 64;
     if (regions.length > maxRegions) {
       regions.sort(function (a, b) {
         return (b.lines ? b.lines.length : 0) - (a.lines ? a.lines.length : 0);
@@ -695,11 +796,11 @@
       if (onProgress) {
         onProgress({
           status: "zoom_region_" + (i + 1) + "_of_" + regions.length,
-          progress: 0.15 + (i / Math.max(1, regions.length)) * 0.8,
+          progress: 0.12 + (i / Math.max(1, regions.length)) * 0.78,
         });
       }
 
-      const pad = Math.max(6, Math.round(Math.max(reg.w, reg.h) * 0.06));
+      const pad = Math.max(8, Math.round(Math.max(reg.w, reg.h) * 0.08));
       const x0 = Math.max(0, Math.round(reg.x - pad));
       const y0 = Math.max(0, Math.round(reg.y - pad));
       const x1 = Math.min(W, Math.round(reg.x + reg.w + pad));
@@ -716,12 +817,12 @@
       cctx.imageSmoothingQuality = "high";
       cctx.drawImage(canvas, x0, y0, rw, rh, 0, 0, rw, rh);
 
-      // Zoom so region long-side is at least ~900–1800px
+      // Higher zoom for small caption blocks
       let up = zoom;
-      const target = Math.min(1800, Math.max(900, Math.max(rw, rh) * zoom));
+      const target = Math.min(2000, Math.max(1100, Math.max(rw, rh) * zoom));
       up = target / Math.max(rw, rh);
-      if (up < 1.5) up = 1.5;
-      if (up > 4) up = 4;
+      if (up < 1.8) up = 1.8;
+      if (up > 4.5) up = 4.5;
 
       const upCrop = upscaleCanvas(crop, up);
       const ocrIn = makeOcrCanvas(upCrop);
@@ -730,7 +831,7 @@
         result && result.data,
         upCrop.width,
         upCrop.height,
-        38
+        36
       );
 
       for (let k = 0; k < cropLines.length; k++) {
@@ -751,21 +852,25 @@
 
     allLines = mergeLineLists([], allLines);
 
-    // Full-image rescue pass: catch labels the probe/regions missed (PMS codes etc.)
-    if (onProgress) onProgress({ status: "full_image_rescue", progress: 0.92 });
+    // Full-image rescue for missed labels
+    if (onProgress) onProgress({ status: "full_image_rescue", progress: 0.9 });
     try {
-      const rescueUp = 1.35;
+      const rescueUp = 1.4;
       const upFull = upscaleCanvas(canvas, rescueUp);
       const fullOcr = makeOcrCanvas(upFull);
       const fullRes = await worker.recognize(fullOcr);
       const fullLines = scaleLines(
-        extractLinesFromResult(fullRes && fullRes.data, upFull.width, upFull.height, 40),
+        extractLinesFromResult(fullRes && fullRes.data, upFull.width, upFull.height, 38),
         1 / rescueUp
       );
       allLines = mergeLineLists(allLines, fullLines);
     } catch (e) {
       console.warn("full rescue failed", e);
     }
+
+    // Rebuild multi-line paragraphs (CS comments etc.)
+    if (onProgress) onProgress({ status: "rebuild_paragraphs", progress: 0.96 });
+    allLines = reconstructParagraphs(allLines, W, H);
 
     return {
       lines: allLines,
@@ -930,7 +1035,7 @@
       let wrapped = wrapText(ctx, dst, line.w);
       let guard = 0;
       while (
-        (wrapped.length * fontSize * 1.2 > line.h * 1.35 || fontSize > line.h) &&
+        (wrapped.length * fontSize * 1.2 > line.h * 2.2 || fontSize > line.h) &&
         fontSize > 8 &&
         guard < 16
       ) {

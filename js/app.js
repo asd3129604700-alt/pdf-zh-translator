@@ -606,7 +606,7 @@
       if (onProgress)
         onProgress({ status: "local_tiled_ocr", progress: 0.1 });
       const ocr = await ImageEngine.ocrCanvasComplex(loaded.canvas, onProgress, {
-        zoom: 2,
+        zoom: 2.4,
       });
       lines = ocr.lines || [];
       engine = "local-tiled";

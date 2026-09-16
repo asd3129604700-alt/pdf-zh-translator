@@ -586,8 +586,10 @@
     const preserve = options.preserveCodes !== false;
     const service = options.service || "auto";
 
-    const pre = preserve ? applyGlossary(raw) : raw;
-    // Full glossary hit (no leftover meaningful English) → done
+    // Glossary only for short labels; long sentences go to MT as-is
+    // (pre-glossary on long text creates mixed EN/ZH and worse output)
+    const isShort = raw.length <= 48;
+    const pre = preserve && isShort ? applyGlossary(raw) : raw;
     if (pre !== raw && meaningfulLatinLeft(pre) === 0) {
       const result = { src: raw, dst: pre, service: "glossary" };
       CACHE.set(key, result);
