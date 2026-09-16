@@ -124,20 +124,98 @@
 
   const GLOSSARY_EXTRA = [
     [/\bSEPARATE PIECE\b/gi, "独立部件"],
+    [/\bSEPARRTE PIECE\b/gi, "独立部件"],
     [/\bMATERIAL SPEC\b/gi, "材质规格"],
     [/\bMINI PLUSH\b/gi, "迷你毛绒"],
     [/\bPRINTED GRAPHIC\b/gi, "印花图案"],
     [/\bEMBROIDERY\b/gi, "刺绣"],
-    [/\bAPPLIQUE\b/gi, "贴布绣"],
+    [/\bAPPLIQU[EÉ]\b/gi, "贴布绣"],
+    [/\bHAIR\/FACE EXAMPLE\b/gi, "头发/面部示例"],
+    [/\bHAIR\/FACE EXAVPLE\b/gi, "头发/面部示例"],
     [/\bHair accessories\b/gi, "发饰"],
+    [/\bHair acc\b/gi, "发饰"],
+    [/\bHair Ribbon\b/gi, "发带"],
+    [/\bHairline\b/gi, "发际线"],
     [/\bAll Face Details\b/gi, "全部面部细节"],
     [/\bFront of Hair\b/gi, "前发"],
-    [/\bRibbons\/Material\b/gi, "丝带/材质"],
+    [/\bLeg Covers\b/gi, "腿套"],
+    [/\bWaist chain\b/gi, "腰链"],
+    [/\bEarrings\b/gi, "耳环"],
+    [/\bNecklace\b/gi, "项链"],
+    [/\bSleeves\b/gi, "袖子"],
+    [/\bDress collar leaves\b/gi, "裙领叶片"],
+    [/\bBodice ruffles, Outter & Inner Dress\b/gi, "衣身荷叶边、外裙与内裙"],
+    [/\bPlease use Silk\/Sateen fabric for white outter dress\b/gi,
+      "白色外裙请使用丝绸/缎面面料"],
+    [/\bPlease use Silk\/Sateen\b/gi, "请使用丝绸/缎面"],
+    [/\bPlease print graphic details but keep as separate piece\b/gi,
+      "请印制图案细节，但保持为独立部件"],
+    [/\bPlease print graphic details\b/gi, "请印制图案细节"],
+    [/\bbut keep as separate piece\b/gi, "但保持为独立部件"],
     [/\bPlease use same execution for hair & face embroidery & applique\b/gi,
       "头发与面部刺绣、贴布请使用相同工艺"],
+    [/\bPlease use same execution for hair\b/gi, "头发请使用相同工艺"],
+    [/\bface embroidery & applique\b/gi, "面部刺绣与贴布"],
+    [/\bPlease dye gradient on soft boa\b/gi, "请在柔软仿毛皮上做渐变染色"],
+    [/\bPlease dye gradient on\b/gi, "请做渐变染色"],
+    [/\bsoft boa\b/gi, "柔软仿毛皮"],
+    [/\bGRADIENT\b/g, "渐变"],
+    [/\bGRADIEN\b/g, "渐变"],
+    [/\bSCALE\b/gi, "比例"],
+    [/\bScALY\b/gi, "比例"],
+    [/\bSkin\b/gi, "肤色"],
+    [/\bPANTONE\b/gi, "PANTONE"],
+    [/\bHAIR\/FACE EXAMPLE\b/gi, "头发/面部示例"],
+    [/\bHAIR\/FACE EXAMP\b/gi, "头发/面部示例"],
+    [/\bPlease use same execution for hair & face embroidery & applique\b/gi,
+      "头发与面部刺绣、贴布请使用相同工艺"],
+    [/\bPlease use same execution for hair\b/gi, "头发请使用相同工艺"],
+    [/\bPlease use same sxeculion for hair\b/gi, "头发请使用相同工艺"],
+    [/\bface embroidery & applique\b/gi, "面部刺绣与贴布"],
     [/\bKeep away from fire\b/gi, "远离火源"],
     [/\bNot for children under 3 years\b/gi, "不适合3岁以下儿童"],
   ];
+
+  // Brand / SKU tokens: never machine-translate these
+  const KEEP_TERMS = {
+    hololive: 1, jakks: 1, pantone: 1, pms: 1,
+    takanashi: 1, kiara: 1, calliope: 1, mori: 1,
+    ninomae: 1, inanis: 1, ina: 1,
+  };
+
+  function shouldKeepAsIs(text) {
+    const t = String(text || "").trim();
+    if (!t) return true;
+    // Pure codes / numbers / PMS
+    if (/^PMS\b/i.test(t) && /\d/.test(t)) return true;
+    if (/^\d+['’]\d+["”]?$/.test(t)) return true;
+    if (/^\d+\s*(cm|mm|kg|oz|in|inch)$/i.test(t)) return true;
+    if (/^[A-Z0-9\-\/\.]{2,20}$/.test(t) && !/[aeiou]{2}/i.test(t)) return true;
+    // Single brand word
+    const lower = t.toLowerCase();
+    if (KEEP_TERMS[lower]) return true;
+    if (/\btakanashi\b/i.test(t) && /\bkiara\b/i.test(t)) return true;
+    if (/\bninomae\b/i.test(t) || /\binanis\b/i.test(t)) return true;
+    if (/\bmori\b/i.test(t) && /\bcalliope\b/i.test(t)) return true;
+    // Entire string is brand-ish (e.g. TAKANASHI KIARA, 11227J TAKANASHI KIARA)
+    const words = lower
+      .replace(/[^a-z\s]+/g, " ")
+      .split(/\s+/)
+      .filter(Boolean);
+    if (words.length && words.every(function (w) {
+      return KEEP_TERMS[w] || w.length <= 1;
+    })) {
+      return true;
+    }
+    // Contains both name parts
+    if (KEEP_TERMS[words[0]] && KEEP_TERMS[words[words.length - 1]]) {
+      return true;
+    }
+    if (words.filter(function (w) { return KEEP_TERMS[w]; }).length >= 2) {
+      return true;
+    }
+    return false;
+  }
 
   function applyLocalGlossary(text) {
     let out = text;
@@ -162,12 +240,57 @@
 
   function looksLikeGarbage(s) {
     if (!s || s.length < 2) return true;
+    // Never treat product/color codes or known labels as garbage
+    if (/\bPMS\b/i.test(s)) return false;
+    if (/\bHOLOLIVE\b/i.test(s)) return false;
+    if (/\bSEPARATE\s+PIECE\b/i.test(s)) return false;
+    if (/\bPRINTED\s+GRAPHIC\b/i.test(s)) return false;
+    if (/\bMATERIAL\s+SPEC\b/i.test(s)) return false;
+    if (/\bEMBROIDERY\b/i.test(s)) return false;
+    if (/\bAPPLIQU/i.test(s)) return false;
+    if (/\bGRADIENT\b/i.test(s)) return false;
+    if (/^\d+[A-Z]{1,2}$/i.test(s.replace(/\s/g, ""))) return false;
     // Too many random punctuation / mixed scripts
     if (/[^A-Za-z0-9\s.,;:!'\"()\-\/&#%@+*]/.test(s)) return true;
     // Alternating case chaos or symbol soup
     if ((s.match(/[^A-Za-z0-9\s]/g) || []).length > s.length * 0.4) return true;
     // Repeated single chars
     if (/^(.)\1+$/.test(s.replace(/\s/g, ""))) return true;
+
+    const lettersOnly = s.replace(/[^A-Za-z]/g, "");
+    const vowels = (lettersOnly.match(/[aeiouAEIOU]/g) || []).length;
+    const consonants = lettersOnly.length - vowels;
+
+    // Very short random fragments from illustration art (oz, ren, Lp, Sy…)
+    if (lettersOnly.length <= 3) {
+      const allow = /^(ok|no|cm|mm|kg|oz|in|pc|jr|sp|ii|iv|vi|ix|or|of|to|on|at|by|de|le)$/i;
+      if (!allow.test(lettersOnly)) return true;
+    }
+    // 4-letter junk without vowels or with only 1 vowel and not a common word
+    if (lettersOnly.length === 4 && vowels === 0) return true;
+    if (
+      lettersOnly.length >= 4 &&
+      lettersOnly.length <= 6 &&
+      vowels === 0
+    ) {
+      return true;
+    }
+    // Low vowel ratio nonsense (e.g. "CAINS" is ok, "RADIEN" borderline; "iY7" caught above)
+    if (lettersOnly.length >= 5 && vowels === 0) return true;
+    // Mixed digit+letter fragments that aren't product codes
+    if (/\d/.test(s) && /[A-Za-z]/.test(s) && !/PMS|SKU|SP\s*\d|^\d/i.test(s)) {
+      // allow things like 4.5" Mini, 11227J
+      if (!/^\d+[A-Z]{0,2}$/i.test(s.replace(/[^A-Za-z0-9]/g, ""))) {
+        // if it looks like random OCR noise
+        if (lettersOnly.length < 6 && !/PMS|SP|SKU|HOLOLIVE/i.test(s)) {
+          // keep 11227J style
+          if (!/^[A-Z]?\d{3,}[A-Z]?$/i.test(s.replace(/\s/g, ""))) {
+            // fall through only if clearly noise
+            if (vowels === 0 || lettersOnly.length <= 4) return true;
+          }
+        }
+      }
+    }
     return false;
   }
 
@@ -1059,6 +1182,7 @@
     geminiExtractLinesTiled: geminiExtractLinesTiled,
     testGeminiKey: testGeminiKey,
     applyLocalGlossary: applyLocalGlossary,
+    shouldKeepAsIs: shouldKeepAsIs,
     terminateWorker: terminateWorker,
   };
 })(window);

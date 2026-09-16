@@ -239,9 +239,10 @@
     const cfg = apiConfig();
     els.apiStatusBadge.classList.remove("on", "warn");
     if (!cfg.apiKey) {
-      els.apiStatusBadge.textContent = "未填 Key";
-      els.apiStatusBadge.classList.add("warn");
-    } else if (!cfg.model) {
+      els.apiStatusBadge.textContent = "本地切块（不调 API）";
+      return;
+    }
+    if (!cfg.model) {
       els.apiStatusBadge.textContent = "未选模型";
       els.apiStatusBadge.classList.add("warn");
     } else {
@@ -344,23 +345,26 @@
     }
   }
 
+  /**
+   * Complex mode validation.
+   * Empty key → local tiled OCR + free translation (explicitly labeled).
+   * Key filled → must be valid enough to attempt API (no silent free fallback on errors).
+   */
   function requireComplexApi() {
     const cfg = apiConfig();
     if (!cfg.apiKey) {
-      fail(
-        "已选择「复杂模式」，但未填写 API Key。\n" +
-          "请在接口设置中填入 Key，或改回「普通模式」（不调 API）。"
-      );
-      return null;
+      // Allowed: local tiled path under Complex mode
+      return { localOnly: true, provider: "local", label: "本地切块" };
     }
     if (cfg.apiKey.length < 10) {
-      fail("API Key 看起来不正确（太短）。请检查后重试。");
+      fail("API Key 看起来不正确（太短）。请检查后重试，或清空 Key 改用本地切块。");
       return null;
     }
     if (!cfg.model) {
       fail(
-        "已选择「复杂模式」，但未选择模型。\n" +
-          "请点「拉取模型列表」后选择，或在输入框手动填写模型名。"
+        "已填写 API Key，但未选择模型。\n" +
+          "请点「拉取模型列表」后选择，或手动输入模型名；\n" +
+          "若只想用本地切块 OCR，请清空 API Key。"
       );
       return null;
     }
@@ -371,11 +375,21 @@
     return cfg;
   }
 
-  function buildOptions() {
+  function buildOptions(apiCfg) {
     const complex = runMode() === "complex";
     if (complex) {
-      const cfg = apiConfig();
+      const cfg = apiCfg || apiConfig();
       const target = els.optLangC.value;
+      if (cfg.localOnly) {
+        return {
+          target: target,
+          service: "auto",
+          preserveCodes: els.optPreserveC.checked,
+          runMode: "complex",
+          vision: "local-tiled",
+          providerLabel: "本地切块（未调 API）",
+        };
+      }
       if (cfg.provider === "gemini") {
         return {
           target: target,
@@ -528,7 +542,7 @@
   }
 
   async function processImageFile(file, options, cover, onProgress) {
-    const loaded = await ImageEngine.loadFileToCanvas(file, 2800);
+    const loaded = await ImageEngine.loadFileToCanvas(file, 3600);
     const original = document.createElement("canvas");
     original.width = loaded.canvas.width;
     original.height = loaded.canvas.height;
@@ -591,9 +605,17 @@
       };
     }
 
-    const texts = lines.map(function (l) {
-      return l.text;
-    });
+    const texts = [];
+    const keepIdx = [];
+    for (let i = 0; i < lines.length; i++) {
+      const t = lines[i].text;
+      if (ImageEngine.shouldKeepAsIs && ImageEngine.shouldKeepAsIs(t)) {
+        keepIdx.push(i);
+      } else {
+        texts.push({ i: i, text: t });
+      }
+    }
+
     const map = {};
     const pairs = [];
 
@@ -604,15 +626,30 @@
         pairs.push({ src: lines[i].text, dst: dst, service: "gemini" });
       }
     } else {
-      const translated = await PdfTranslator.translateMany(texts, options);
-      for (let i = 0; i < lines.length; i++) {
-        let dst = translated[i].dst;
+      keepIdx.forEach(function (i) {
+        map[lines[i].text] = lines[i].text;
+        pairs.push({
+          src: lines[i].text,
+          dst: lines[i].text,
+          service: "keep",
+        });
+      });
+
+      const rawTexts = texts.map(function (x) {
+        return x.text;
+      });
+      const translated = rawTexts.length
+        ? await PdfTranslator.translateMany(rawTexts, options)
+        : [];
+      for (let k = 0; k < texts.length; k++) {
+        const i = texts[k].i;
+        let dst = translated[k].dst;
         if (window.ImageEngine && ImageEngine.applyLocalGlossary) {
           const glossed = ImageEngine.applyLocalGlossary(lines[i].text);
           if (glossed !== lines[i].text) {
             const leftover = (glossed.match(/[A-Za-z]{3,}/g) || []).filter(
               function (w) {
-                return !/^(please|use|sku|inch|color|and|for|the|with|from|under|years)$/i.test(
+                return !/^(please|use|sku|inch|color|and|for|the|with|from|under|years|hololive)$/i.test(
                   w
                 );
               }
@@ -620,11 +657,23 @@
             if (leftover.length === 0) dst = glossed;
           }
         }
+        // Prefer glossary over bad MT for short domain labels
+        if (window.ImageEngine && ImageEngine.applyLocalGlossary) {
+          const g2 = ImageEngine.applyLocalGlossary(lines[i].text);
+          if (g2 !== lines[i].text && lines[i].text.length < 40) {
+            const leftover2 = (g2.match(/[A-Za-z]{3,}/g) || []).filter(
+              function (w) {
+                return !/^(please|use|and|for|the|with|from|on|to|of|at|by)$/i.test(w);
+              }
+            );
+            if (leftover2.length === 0) dst = g2;
+          }
+        }
         map[lines[i].text] = dst;
         pairs.push({
           src: lines[i].text,
           dst: dst,
-          service: translated[i].service,
+          service: translated[k].service,
         });
       }
     }
@@ -665,7 +714,7 @@
       if (!apiCfg) return;
     }
 
-    const options = buildOptions();
+    const options = buildOptions(apiCfg);
     const cover = complex ? els.optCoverC.checked : els.optCover.checked;
 
     showPanel("process");
