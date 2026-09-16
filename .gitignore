@@ -3,3 +3,4 @@ test/out/
 scripts/
 .DS_Store
 *.log
+test/ds-key.txt

@@ -61,17 +61,16 @@
   const PROVIDER_PRESETS = {
     deepseek: {
       baseUrl: "https://api.deepseek.com",
-      model: "deepseek-chat",
+      model: "deepseek-v4-pro",
       models: [
+        "deepseek-v4-pro",
+        "deepseek-flash",
         "deepseek-chat",
         "deepseek-reasoner",
-        "deepseek-v4",
-        "deepseek-v4.1",
-        "deepseek-v4.1f",
       ],
       label: "DeepSeek",
       keyUrl: "https://platform.deepseek.com/api_keys",
-      note: "DeepSeek：优化英文→中文译文（图片识别仍用本地切块 OCR）。可点「拉取模型列表」获取你账号可用的全部模型 ID。",
+      note: "DeepSeek：优化英文→中文译文（图片识别仍用本地框选放大 OCR）。点「拉取模型列表」获取你网关真实可用的模型 ID（常见：deepseek-v4-pro / deepseek-flash）。",
     },
     openai: {
       baseUrl: "https://api.openai.com",
