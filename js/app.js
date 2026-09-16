@@ -815,7 +815,7 @@
         state.pages.push(res.page);
         if (res.empty) emptyCount++;
         else {
-          totalTexts += res.texts.length;
+          totalTexts += (res.page.lines || []).length;
           enginesUsed.push(res.engine);
         }
         setProgress(

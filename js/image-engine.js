@@ -602,8 +602,12 @@
   }
 
   /**
-   * Complex mode: split into 2 or 4 tiles, upscale each, OCR, map boxes back.
-   * Vector-style artwork stays sharp when upscaled; small labels get more pixels.
+   * Complex mode (region-based):
+   * 1) Probe whole image (downscaled) to find text line boxes
+   * 2) Merge nearby boxes into text regions
+   * 3) Crop each region, upscale ~2×, OCR at high zoom
+   * 4) Map boxes back to full-image coordinates
+   * No fixed 2×2 tiling — only zoom into where text actually is.
    */
   async function ocrCanvasComplex(canvas, onProgress, opts) {
     opts = opts || {};
@@ -611,11 +615,11 @@
     const W = canvas.width;
     const H = canvas.height;
 
-    // --- Pass 0: coarse detect where text lives (downscaled) ---
-    if (onProgress) onProgress({ status: "detect_text_regions", progress: 0.04 });
+    // --- Pass 1: coarse detect text locations ---
+    if (onProgress) onProgress({ status: "detect_text_boxes", progress: 0.04 });
     let probeLines = [];
     try {
-      const probeScale = Math.min(1, 900 / Math.max(W, H));
+      const probeScale = Math.min(1, 1800 / Math.max(W, H));
       const pw = Math.max(80, Math.round(W * probeScale));
       const ph = Math.max(80, Math.round(H * probeScale));
       const probe = document.createElement("canvas");
@@ -628,195 +632,98 @@
       const probeOcr = makeOcrCanvas(probe);
       const probeRes = await worker.recognize(probeOcr);
       const inv = 1 / probeScale;
-      probeLines = extractLinesFromResult(probeRes && probeRes.data, pw, ph, 35).map(
-        function (l) {
-          return {
-            x: l.x * inv,
-            y: l.y * inv,
-            w: l.w * inv,
-            h: l.h * inv,
-            text: l.text,
-          };
-        }
-      );
+      probeLines = extractLinesFromResult(
+        probeRes && probeRes.data,
+        pw,
+        ph,
+        28
+      ).map(function (l) {
+        return {
+          x: l.x * inv,
+          y: l.y * inv,
+          w: l.w * inv,
+          h: l.h * inv,
+          text: l.text,
+          conf: l.conf,
+        };
+      });
     } catch (e) {
+      console.warn("probe failed", e);
       probeLines = [];
     }
 
-    // If probe already found a lot of clear text, use those boxes directly
-    // (still re-OCR tiles that contain them for better small-text quality)
-    const hasProbe = probeLines.length >= 3;
-
-    // Analyze distribution → choose 2 vs 4 tiles
-    let cols = 2;
-    let rows = 1;
-    if (hasProbe) {
-      let left = 0;
-      let right = 0;
-      let top = 0;
-      let bottom = 0;
-      const midX = W / 2;
-      const midY = H / 2;
-      for (let i = 0; i < probeLines.length; i++) {
-        const cx = probeLines[i].x + probeLines[i].w / 2;
-        const cy = probeLines[i].y + probeLines[i].h / 2;
-        if (cx < midX) left++;
-        else right++;
-        if (cy < midY) top++;
-        else bottom++;
-      }
-      const n = probeLines.length;
-      const spreadX = Math.min(left, right) / n; // 0.5 = balanced L/R
-      const spreadY = Math.min(top, bottom) / n;
-
-      if (spreadX < 0.18 && spreadY < 0.18) {
-        // Text clustered in one quadrant → 2 tiles on dominant axis
-        if (left + right > 0 && Math.abs(left - right) > Math.abs(top - bottom)) {
-          cols = 2;
-          rows = 1;
-        } else {
-          cols = 1;
-          rows = 2;
-        }
-      } else if (spreadX >= 0.18 && spreadY >= 0.18) {
-        // Text in multiple quadrants → 2x2
-        cols = 2;
-        rows = 2;
-      } else if (spreadX >= 0.18) {
-        cols = 2;
-        rows = 1;
-      } else {
-        cols = 1;
-        rows = 2;
-      }
-      // Dense / many lines → prefer 4 tiles for resolution
-      if (n >= 12 || Math.max(W, H) >= 1600) {
-        cols = 2;
-        rows = 2;
-      }
+    // Fallback: if probe found nothing, treat whole image as one region
+    let regions = [];
+    if (probeLines.length) {
+      regions = clusterTextRegions(probeLines, W, H);
     } else {
-      // No probe text: fall back to aspect ratio (original behavior)
-      if (W > H * 1.15) {
-        cols = 2;
-        rows = 1;
-      } else if (H > W * 1.15) {
-        cols = 1;
-        rows = 2;
-      } else {
-        cols = 2;
-        rows = 2;
-      }
-      if (Math.max(W, H) >= 1600) {
-        cols = 2;
-        rows = 2;
-      }
+      regions = [{ x: 0, y: 0, w: W, h: H, lines: [] }];
     }
 
     if (onProgress) {
       onProgress({
-        status: "tile_grid_" + cols + "x" + rows,
-        progress: 0.08,
+        status: "found_" + regions.length + "_text_regions",
+        progress: 0.12,
       });
     }
 
-    // Overlap so text at tile borders is not cut
-    const overlap = Math.round(Math.min(W / cols, H / rows) * 0.08);
-    const tileW = Math.ceil(W / cols);
-    const tileH = Math.ceil(H / rows);
-    let up = opts.zoom || 2;
-    const tileLong = Math.max(tileW, tileH) * up;
-    if (tileLong > 2800) up = Math.max(1.2, 2800 / Math.max(tileW, tileH));
-    const minUp = 1600 / Math.max(tileW, tileH);
-    if (up < minUp && minUp <= 3) up = Math.min(3, minUp);
-
-    // Build tile list; skip tiles with no probe text (save time)
-    const tiles = [];
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const x0 = Math.max(0, Math.floor(c * tileW) - (c > 0 ? overlap : 0));
-        const y0 = Math.max(0, Math.floor(r * tileH) - (r > 0 ? overlap : 0));
-        const x1 = Math.min(
-          W,
-          Math.floor((c + 1) * tileW) + (c < cols - 1 ? overlap : 0)
-        );
-        const y1 = Math.min(
-          H,
-          Math.floor((r + 1) * tileH) + (r < rows - 1 ? overlap : 0)
-        );
-        const tw = x1 - x0;
-        const th = y1 - y0;
-        if (tw < 8 || th < 8) continue;
-
-        let hasText = true;
-        if (hasProbe) {
-          hasText = probeLines.some(function (L) {
-            const cx = L.x + L.w / 2;
-            const cy = L.y + L.h / 2;
-            return cx >= x0 - 4 && cx <= x1 + 4 && cy >= y0 - 4 && cy <= y1 + 4;
-          });
-        }
-        if (hasText) tiles.push({ x0: x0, y0: y0, tw: tw, th: th, c: c, r: r });
-      }
-    }
-    // Safety: if all skipped, process all tiles
-    if (!tiles.length) {
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          const x0 = Math.max(0, Math.floor(c * tileW) - (c > 0 ? overlap : 0));
-          const y0 = Math.max(0, Math.floor(r * tileH) - (r > 0 ? overlap : 0));
-          const x1 = Math.min(
-            W,
-            Math.floor((c + 1) * tileW) + (c < cols - 1 ? overlap : 0)
-          );
-          const y1 = Math.min(
-            H,
-            Math.floor((r + 1) * tileH) + (r < rows - 1 ? overlap : 0)
-          );
-          const tw = x1 - x0;
-          const th = y1 - y0;
-          if (tw >= 8 && th >= 8) tiles.push({ x0: x0, y0: y0, tw: tw, th: th, c: c, r: r });
-        }
-      }
+    const zoom = opts.zoom || 2.2;
+    const maxRegions = opts.maxRegions || 48;
+    if (regions.length > maxRegions) {
+      regions.sort(function (a, b) {
+        return (b.lines ? b.lines.length : 0) - (a.lines ? a.lines.length : 0);
+      });
+      regions = regions.slice(0, maxRegions);
     }
 
-    const total = tiles.length;
-    let doneTiles = 0;
-    let allLines = hasProbe ? probeLines.slice() : [];
+    let allLines = [];
+    let done = 0;
 
-    for (let t = 0; t < tiles.length; t++) {
-      const tileInfo = tiles[t];
-      const x0 = tileInfo.x0;
-      const y0 = tileInfo.y0;
-      const tw = tileInfo.tw;
-      const th = tileInfo.th;
-
+    for (let i = 0; i < regions.length; i++) {
+      const reg = regions[i];
       if (onProgress) {
         onProgress({
-          status: "tile_" + (doneTiles + 1) + "_of_" + total,
-          progress: 0.1 + (doneTiles / Math.max(1, total)) * 0.8,
+          status: "zoom_region_" + (i + 1) + "_of_" + regions.length,
+          progress: 0.15 + (i / Math.max(1, regions.length)) * 0.8,
         });
       }
 
-      const tile = document.createElement("canvas");
-      tile.width = tw;
-      tile.height = th;
-      const tctx = tile.getContext("2d", { willReadFrequently: true });
-      tctx.imageSmoothingEnabled = true;
-      tctx.imageSmoothingQuality = "high";
-      tctx.drawImage(canvas, x0, y0, tw, th, 0, 0, tw, th);
+      const pad = Math.max(6, Math.round(Math.max(reg.w, reg.h) * 0.06));
+      const x0 = Math.max(0, Math.round(reg.x - pad));
+      const y0 = Math.max(0, Math.round(reg.y - pad));
+      const x1 = Math.min(W, Math.round(reg.x + reg.w + pad));
+      const y1 = Math.min(H, Math.round(reg.y + reg.h + pad));
+      const rw = x1 - x0;
+      const rh = y1 - y0;
+      if (rw < 12 || rh < 12) continue;
 
-      const upTile = upscaleCanvas(tile, up);
-      const ocrIn = makeOcrCanvas(upTile);
+      const crop = document.createElement("canvas");
+      crop.width = rw;
+      crop.height = rh;
+      const cctx = crop.getContext("2d", { willReadFrequently: true });
+      cctx.imageSmoothingEnabled = true;
+      cctx.imageSmoothingQuality = "high";
+      cctx.drawImage(canvas, x0, y0, rw, rh, 0, 0, rw, rh);
+
+      // Zoom so region long-side is at least ~900–1800px
+      let up = zoom;
+      const target = Math.min(1800, Math.max(900, Math.max(rw, rh) * zoom));
+      up = target / Math.max(rw, rh);
+      if (up < 1.5) up = 1.5;
+      if (up > 4) up = 4;
+
+      const upCrop = upscaleCanvas(crop, up);
+      const ocrIn = makeOcrCanvas(upCrop);
       const result = await worker.recognize(ocrIn);
-      const tileLines = extractLinesFromResult(
+      const cropLines = extractLinesFromResult(
         result && result.data,
-        upTile.width,
-        upTile.height,
-        40
+        upCrop.width,
+        upCrop.height,
+        38
       );
 
-      for (let i = 0; i < tileLines.length; i++) {
-        const L = tileLines[i];
+      for (let k = 0; k < cropLines.length; k++) {
+        const L = cropLines[k];
         allLines.push({
           x: x0 + L.x / up,
           y: y0 + L.y / up,
@@ -828,10 +735,27 @@
           conf: L.conf,
         });
       }
-      doneTiles++;
+      done++;
     }
 
     allLines = mergeLineLists([], allLines);
+
+    // Full-image rescue pass: catch labels the probe/regions missed (PMS codes etc.)
+    if (onProgress) onProgress({ status: "full_image_rescue", progress: 0.92 });
+    try {
+      const rescueUp = 1.35;
+      const upFull = upscaleCanvas(canvas, rescueUp);
+      const fullOcr = makeOcrCanvas(upFull);
+      const fullRes = await worker.recognize(fullOcr);
+      const fullLines = scaleLines(
+        extractLinesFromResult(fullRes && fullRes.data, upFull.width, upFull.height, 40),
+        1 / rescueUp
+      );
+      allLines = mergeLineLists(allLines, fullLines);
+    } catch (e) {
+      console.warn("full rescue failed", e);
+    }
+
     return {
       lines: allLines,
       words: [],
@@ -840,9 +764,102 @@
           return l.text;
         })
         .join("\n"),
-      grid: cols + "x" + rows,
-      tilesProcessed: doneTiles,
+      mode: "region-zoom",
+      regions: regions.length,
+      regionsProcessed: done,
     };
+  }
+
+  /**
+   * Merge nearby probe line boxes into larger text regions
+   * (one region ≈ one label cluster / callout block).
+   */
+  function clusterTextRegions(lines, W, H) {
+    const boxes = lines
+      .filter(function (l) {
+        return l && l.w > 2 && l.h > 2;
+      })
+      .map(function (l) {
+        return {
+          x: l.x,
+          y: l.y,
+          w: l.w,
+          h: l.h,
+          text: l.text || "",
+        };
+      });
+    if (!boxes.length) return [];
+
+    // Sort by reading order
+    boxes.sort(function (a, b) {
+      if (Math.abs(a.y - b.y) > Math.max(a.h, b.h) * 0.6) return a.y - b.y;
+      return a.x - b.x;
+    });
+
+    const used = new Array(boxes.length).fill(false);
+    const regions = [];
+
+    for (let i = 0; i < boxes.length; i++) {
+      if (used[i]) continue;
+      used[i] = true;
+      let x0 = boxes[i].x;
+      let y0 = boxes[i].y;
+      let x1 = boxes[i].x + boxes[i].w;
+      let y1 = boxes[i].y + boxes[i].h;
+      const members = [boxes[i]];
+
+      // Grow cluster: merge boxes that are close (same label / multi-line note)
+      let grew = true;
+      let guard = 0;
+      while (grew && guard < 12) {
+        grew = false;
+        guard++;
+        for (let j = 0; j < boxes.length; j++) {
+          if (used[j]) continue;
+          const b = boxes[j];
+          const bx0 = b.x;
+          const by0 = b.y;
+          const bx1 = b.x + b.w;
+          const by1 = b.y + b.h;
+          const gapX = Math.max(0, Math.max(x0 - bx1, bx0 - x1));
+          const gapY = Math.max(0, Math.max(y0 - by1, by0 - y1));
+          // Horizontal overlap (or tiny gap) — same column / stacked lines
+          const overlapX = Math.min(x1, bx1) - Math.max(x0, bx0);
+          const sameColumn = overlapX > -10;
+          // Only merge vertically nearby lines in the same column,
+          // or a word immediately to the right on the same baseline
+          const sameRow =
+            gapY < Math.max(12, (y1 - y0) * 0.45) && gapX < Math.max(18, (x1 - x0) * 0.25);
+          if (sameColumn && gapY < Math.max(22, H * 0.008)) {
+            used[j] = true;
+            members.push(b);
+            x0 = Math.min(x0, bx0);
+            y0 = Math.min(y0, by0);
+            x1 = Math.max(x1, bx1);
+            y1 = Math.max(y1, by1);
+            grew = true;
+          } else if (sameRow) {
+            used[j] = true;
+            members.push(b);
+            x0 = Math.min(x0, bx0);
+            y0 = Math.min(y0, by0);
+            x1 = Math.max(x1, bx1);
+            y1 = Math.max(y1, by1);
+            grew = true;
+          }
+        }
+      }
+
+      regions.push({
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+        lines: members,
+      });
+    }
+
+    return regions;
   }
 
   function wrapText(ctx, text, maxWidth) {
