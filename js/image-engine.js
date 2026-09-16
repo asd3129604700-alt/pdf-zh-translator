@@ -675,6 +675,58 @@
    * Optional high-quality path: Gemini vision returns cleaner line list + translations.
    * Requires user API key. Falls back to OCR if not configured / fails.
    */
+  async function geminiFetch(apiKey, body) {
+    const url =
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" +
+      encodeURIComponent(apiKey);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(function () {
+      return null;
+    });
+    if (!res.ok) {
+      const msg =
+        (json && json.error && json.error.message) ||
+        "HTTP " + res.status;
+      const err = new Error("Gemini API 调用失败：" + msg);
+      err.status = res.status;
+      err.payload = json;
+      throw err;
+    }
+    if (!json) throw new Error("Gemini 返回空响应");
+    return json;
+  }
+
+  /** Quick key check: tiny generateContent call. Throws with a clear message. */
+  async function testGeminiKey(apiKey) {
+    if (!apiKey || !apiKey.trim()) {
+      throw new Error("未填写 Gemini API Key");
+    }
+    const key = apiKey.trim();
+    if (key.length < 10) {
+      throw new Error("Gemini API Key 格式不正确（太短）");
+    }
+    const json = await geminiFetch(key, {
+      contents: [{ parts: [{ text: "ping" }] }],
+      generationConfig: { maxOutputTokens: 8 },
+    });
+    const text =
+      (json.candidates &&
+        json.candidates[0] &&
+        json.candidates[0].content &&
+        json.candidates[0].content.parts &&
+        json.candidates[0].content.parts[0] &&
+        json.candidates[0].content.parts[0].text) ||
+      "";
+    if (!json.candidates) {
+      throw new Error("Gemini Key 校验失败：响应异常");
+    }
+    return { ok: true, echo: String(text).slice(0, 40) };
+  }
+
   async function geminiExtractLines(imageCanvas, targetLang, apiKey) {
     if (!apiKey) throw new Error("未配置 Gemini API Key");
     // Downscale for API payload
@@ -701,9 +753,6 @@
       "坐标是相对图片左上角的归一化 0-1000 整数。" +
       "只输出 JSON 数组本身。忽略无法辨认的碎片。";
 
-    const url =
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" +
-      encodeURIComponent(apiKey);
     const body = {
       contents: [
         {
@@ -715,13 +764,7 @@
       ],
       generationConfig: { temperature: 0.1, responseMimeType: "application/json" },
     };
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error("Gemini HTTP " + res.status);
-    const json = await res.json();
+    const json = await geminiFetch(apiKey, body);
     const text =
       json?.candidates?.[0]?.content?.parts?.[0]?.text ||
       json?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("") ||
@@ -731,7 +774,7 @@
       arr = JSON.parse(text);
     } catch (e) {
       const m = text.match(/\[[\s\S]*\]/);
-      if (!m) throw new Error("Gemini 返回无法解析");
+      if (!m) throw new Error("Gemini 返回无法解析（请检查 Key 是否有效）");
       arr = JSON.parse(m[0]);
     }
     if (!Array.isArray(arr)) throw new Error("Gemini 返回格式错误");
@@ -875,6 +918,7 @@
     overlayLines: overlayLines,
     geminiExtractLines: geminiExtractLines,
     geminiExtractLinesTiled: geminiExtractLinesTiled,
+    testGeminiKey: testGeminiKey,
     applyLocalGlossary: applyLocalGlossary,
     terminateWorker: terminateWorker,
   };

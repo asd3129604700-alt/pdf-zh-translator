@@ -13,6 +13,9 @@
     optPreserve: $("#opt-preserve-codes"),
     optImageMode: $("#opt-image-mode"),
     optGeminiKey: $("#opt-gemini-key"),
+    btnTestKey: $("#btn-test-key"),
+    apiTestResult: $("#api-test-result"),
+    apiStatusBadge: $("#api-status-badge"),
     panelUpload: $("#panel-upload"),
     panelProcess: $("#panel-process"),
     panelResult: $("#panel-result"),
@@ -249,68 +252,58 @@
 
     let lines = null;
     let pretranslated = false;
+    let engine = "local-ocr";
 
     const imageMode = (els.optImageMode && els.optImageMode.value) || "ocr";
     const geminiKey =
-      (els.optGeminiKey && els.optGeminiKey.value || "").trim();
+      ((els.optGeminiKey && els.optGeminiKey.value) || "").trim();
 
-    if (imageMode === "gemini" && geminiKey) {
-      // Whole-image Gemini (fast, 1 API call)
-      if (onOcrProgress) onOcrProgress({ status: "gemini_vision", progress: 0.2 });
-      try {
-        lines = await ImageEngine.geminiExtractLines(
-          original,
-          options.target || "zh-CN",
-          geminiKey
+    // --- API mode gates: no silent fallback ---
+    if (imageMode === "gemini") {
+      if (!geminiKey) {
+        const err = new Error(
+          "已选择「Gemini 整图视觉」，但未填写 API Key。请在下方可选 API 中填入 Key，或改回本地 OCR。"
         );
-        pretranslated = true;
-      } catch (err) {
-        console.warn("Gemini failed, falling back to OCR:", err);
-        if (onOcrProgress)
-          onOcrProgress({ status: "gemini_failed_use_ocr", progress: 0.3 });
-        lines = null;
-        pretranslated = false;
+        err.code = "NO_API_KEY";
+        throw err;
       }
+      if (onOcrProgress) onOcrProgress({ status: "calling_gemini_api", progress: 0.2 });
+      lines = await ImageEngine.geminiExtractLines(
+        original,
+        options.target || "zh-CN",
+        geminiKey
+      );
+      pretranslated = true;
+      engine = "gemini-whole";
+    } else if (imageMode === "complex" && geminiKey) {
+      // User filled key in complex mode → they expect real API calls
+      if (onOcrProgress)
+        onOcrProgress({ status: "calling_gemini_tiled_api", progress: 0.1 });
+      lines = await ImageEngine.geminiExtractLinesTiled(
+        original,
+        options.target || "zh-CN",
+        geminiKey,
+        onOcrProgress
+      );
+      pretranslated = true;
+      engine = "gemini-tiled";
+    } else if (imageMode === "complex") {
+      if (onOcrProgress)
+        onOcrProgress({ status: "local_tiled_ocr", progress: 0.1 });
+      const ocr = await ImageEngine.ocrCanvasComplex(
+        loaded.canvas,
+        onOcrProgress,
+        { zoom: 2 }
+      );
+      lines = ocr.lines || [];
+      engine = "local-tiled";
+    } else {
+      const ocr = await ImageEngine.ocrCanvas(loaded.canvas, onOcrProgress);
+      lines = ocr.lines || [];
+      engine = "local-ocr";
     }
 
     if (!lines || !lines.length) {
-      if (imageMode === "complex" && geminiKey) {
-        // Complex + API: tile × Gemini (2–4 calls, better on dense specs)
-        if (onOcrProgress)
-          onOcrProgress({ status: "complex_gemini_start", progress: 0.1 });
-        try {
-          lines = await ImageEngine.geminiExtractLinesTiled(
-            original,
-            options.target || "zh-CN",
-            geminiKey,
-            onOcrProgress
-          );
-          pretranslated = true;
-        } catch (err) {
-          console.warn("Tiled Gemini failed, fall back to local tiled OCR:", err);
-          lines = null;
-          pretranslated = false;
-        }
-      }
-    }
-
-    if (!lines || !lines.length) {
-      if (imageMode === "complex") {
-        // Local tiled OCR (no key needed)
-        const ocr = await ImageEngine.ocrCanvasComplex(
-          loaded.canvas,
-          onOcrProgress,
-          { zoom: 2 }
-        );
-        lines = ocr.lines || [];
-      } else {
-        const ocr = await ImageEngine.ocrCanvas(loaded.canvas, onOcrProgress);
-        lines = ocr.lines || [];
-      }
-      pretranslated = false;
-    }
-
-    if (!lines.length) {
       return {
         page: {
           original: original,
@@ -319,9 +312,11 @@
           map: {},
           pairs: [],
           label: file.name,
+          engine: engine,
         },
         empty: true,
         texts: [],
+        engine: engine,
       };
     }
 
@@ -380,14 +375,46 @@
         map: map,
         pairs: pairs,
         label: file.name,
+        engine: engine,
       },
       empty: false,
       texts: texts,
+      engine: engine,
     };
+  }
+
+  function engineLabel(code) {
+    const map = {
+      "local-ocr": "本地 OCR",
+      "local-tiled": "本地复杂切块 OCR",
+      "gemini-whole": "Gemini 整图 API",
+      "gemini-tiled": "Gemini 切块 API",
+      pdf: "PDF 文字层",
+    };
+    return map[code] || code || "未知";
   }
 
   async function handleFiles(files) {
     if (!files || !files.length) return;
+
+    const imageMode = (els.optImageMode && els.optImageMode.value) || "ocr";
+    const geminiKey = ((els.optGeminiKey && els.optGeminiKey.value) || "").trim();
+    const images = files.filter(function (f) {
+      return IMAGE_RE.test(f.name) || (f.type || "").startsWith("image/");
+    });
+
+    // Intercept: API modes require a key — no silent local fallback
+    if (images.length && imageMode === "gemini" && !geminiKey) {
+      fail(
+        "已选择「Gemini 整图视觉」，但未填写 API Key。\n" +
+          "请填写 Key 后重试，或把图片识别改回「本地 OCR」/「复杂图片模式（不填 Key）」。"
+      );
+      return;
+    }
+    if (images.length && imageMode === "gemini" && geminiKey.length < 10) {
+      fail("Gemini API Key 看起来不正确（太短）。请检查后重试，或改用本地模式。");
+      return;
+    }
 
     showPanel("process");
     setStep("load");
@@ -406,14 +433,12 @@
     state.pages = [];
     let totalTexts = 0;
     let emptyCount = 0;
+    const enginesUsed = [];
 
     try {
       setStep("extract");
       const pdfs = files.filter(function (f) {
         return PDF_RE.test(f.name) || f.type === "application/pdf";
-      });
-      const images = files.filter(function (f) {
-        return IMAGE_RE.test(f.name) || (f.type || "").startsWith("image/");
       });
 
       // PDF first
@@ -428,11 +453,12 @@
           state.pages = state.pages.concat(res.pages);
           res.pages.forEach(function (p) {
             totalTexts += (p.lines || []).length;
+            enginesUsed.push("pdf");
           });
         }
       }
 
-      // Images with OCR
+      // Images
       for (let i = 0; i < images.length; i++) {
         const file = images[i];
         const base = 28 + (i / Math.max(1, images.length)) * 40;
@@ -460,9 +486,10 @@
         );
         state.pages.push(res.page);
         if (res.empty) emptyCount++;
-        else totalTexts += res.texts.length;
-
-        // Translate progress is inside processImageFile via translateMany (no callback wired here for simplicity)
+        else {
+          totalTexts += res.texts.length;
+          enginesUsed.push(res.engine || "local-ocr");
+        }
         setProgress(
           28 + ((i + 1) / Math.max(1, images.length)) * 40,
           "已处理 " + (i + 1) + " / " + images.length + " 张图片"
@@ -486,6 +513,14 @@
 
       setStep("done");
       setProgress(100, "完成。共 " + state.pages.length + " 页。");
+
+      // Unique engine labels so user can see whether API was actually used
+      const uniq = [];
+      enginesUsed.forEach(function (e) {
+        const lab = engineLabel(e);
+        if (uniq.indexOf(lab) < 0) uniq.push(lab);
+      });
+
       els.resultMeta.textContent =
         files.length +
         " 个文件 · " +
@@ -494,6 +529,7 @@
         totalTexts +
         " 条文本 · 目标 " +
         (els.optLang.value === "zh-TW" ? "繁體中文" : "简体中文") +
+        (uniq.length ? " · 识别：" + uniq.join(" + ") : "") +
         (emptyCount ? " · " + emptyCount + " 页无文字" : "");
       state.pageIndex = 0;
       state.showOriginal = false;
@@ -503,7 +539,21 @@
       renderTextList(state.pages[0]);
     } catch (err) {
       console.error(err);
-      fail("处理出错：" + (err && err.message ? err.message : String(err)));
+      let msg = err && err.message ? err.message : String(err);
+      if (err && err.code === "NO_API_KEY") {
+        fail(msg);
+        return;
+      }
+      // Surface API failures clearly (no silent fallback)
+      if (/Gemini|HTTP 4|HTTP 5|API/i.test(msg)) {
+        fail(
+          "API 调用失败，已停止（不会悄悄改用本地 OCR）。\n" +
+            msg +
+            "\n\n请检查 API Key 是否正确、是否开通 Gemini，或改回本地 OCR 模式。"
+        );
+        return;
+      }
+      fail("处理出错：" + msg);
     }
   }
 
@@ -591,20 +641,73 @@
     if (els.optImageMode && savedMode) els.optImageMode.value = savedMode;
   } catch (e) { /* private mode */ }
 
+  function updateApiBadge() {
+    if (!els.apiStatusBadge || !els.optImageMode) return;
+    const mode = els.optImageMode.value;
+    const key = ((els.optGeminiKey && els.optGeminiKey.value) || "").trim();
+    els.apiStatusBadge.classList.remove("on", "warn");
+    if (mode === "gemini" && !key) {
+      els.apiStatusBadge.textContent = "需要 Key（未填）";
+      els.apiStatusBadge.classList.add("warn");
+    } else if (mode === "gemini" && key) {
+      els.apiStatusBadge.textContent = "将调用 Gemini 整图 API";
+      els.apiStatusBadge.classList.add("on");
+    } else if (mode === "complex" && key) {
+      els.apiStatusBadge.textContent = "将调用 Gemini 切块 API";
+      els.apiStatusBadge.classList.add("on");
+    } else if (mode === "complex") {
+      els.apiStatusBadge.textContent = "本地切块 OCR（未填 Key）";
+    } else {
+      els.apiStatusBadge.textContent = "本地 OCR（不调 API）";
+    }
+  }
+
   if (els.optGeminiKey) {
     els.optGeminiKey.addEventListener("change", function () {
       try {
         localStorage.setItem("pdfzh_gemini_key", els.optGeminiKey.value.trim());
       } catch (e) { /* ignore */ }
+      updateApiBadge();
     });
+    els.optGeminiKey.addEventListener("input", updateApiBadge);
   }
   if (els.optImageMode) {
     els.optImageMode.addEventListener("change", function () {
       try {
         localStorage.setItem("pdfzh_image_mode", els.optImageMode.value);
       } catch (e) { /* ignore */ }
+      updateApiBadge();
     });
   }
 
+  if (els.btnTestKey) {
+    els.btnTestKey.addEventListener("click", async function () {
+      const key = ((els.optGeminiKey && els.optGeminiKey.value) || "").trim();
+      const out = els.apiTestResult;
+      if (!out) return;
+      out.classList.remove("ok", "err");
+      if (!key) {
+        out.textContent = "请先填写 API Key，再点测试。";
+        out.classList.add("err");
+        return;
+      }
+      out.textContent = "正在请求 Gemini 校验 Key…";
+      els.btnTestKey.disabled = true;
+      try {
+        const r = await ImageEngine.testGeminiKey(key);
+        out.textContent = "Key 有效，已成功调用 Gemini API。";
+        out.classList.add("ok");
+      } catch (err) {
+        out.textContent =
+          "Key 无效或调用失败：" + (err && err.message ? err.message : err);
+        out.classList.add("err");
+      } finally {
+        els.btnTestKey.disabled = false;
+        updateApiBadge();
+      }
+    });
+  }
+
+  updateApiBadge();
   showPanel("upload");
 })();

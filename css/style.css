@@ -198,6 +198,42 @@ html, body {
 .api-panel a {
   color: var(--accent-deep);
 }
+.api-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.api-row .field.grow {
+  flex: 1 1 260px;
+  max-width: 420px;
+  margin-top: 0;
+}
+.api-row .btn {
+  margin-bottom: 2px;
+}
+.api-test-result {
+  margin: 8px 0 0;
+  min-height: 1.3em;
+  font-size: 0.85rem;
+}
+.api-test-result.ok {
+  color: var(--accent-deep);
+}
+.api-test-result.err {
+  color: var(--danger);
+}
+#api-status-badge.on {
+  color: var(--accent-deep);
+  border-color: #b7d4c9;
+  background: var(--accent-soft);
+}
+#api-status-badge.warn {
+  color: var(--danger);
+  border-color: #e0b5a5;
+  background: #fdf0ea;
+}
 
 .options {
   display: grid;
