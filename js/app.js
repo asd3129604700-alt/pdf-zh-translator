@@ -273,8 +273,18 @@
     }
 
     if (!lines || !lines.length) {
-      const ocr = await ImageEngine.ocrCanvas(loaded.canvas, onOcrProgress);
-      lines = ocr.lines || [];
+      if (imageMode === "complex") {
+        // Split into 2/4 tiles, upscale ~200%, OCR each, map back
+        const ocr = await ImageEngine.ocrCanvasComplex(
+          loaded.canvas,
+          onOcrProgress,
+          { zoom: 2 }
+        );
+        lines = ocr.lines || [];
+      } else {
+        const ocr = await ImageEngine.ocrCanvas(loaded.canvas, onOcrProgress);
+        lines = ocr.lines || [];
+      }
       pretranslated = false;
     }
 

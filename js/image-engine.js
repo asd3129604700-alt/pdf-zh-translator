@@ -478,6 +478,111 @@
     return { lines: lines, words: words, text: (data && data.text) || "" };
   }
 
+  /**
+   * Complex mode: split into 2 or 4 tiles, upscale each, OCR, map boxes back.
+   * Vector-style artwork stays sharp when upscaled; small labels get more pixels.
+   */
+  async function ocrCanvasComplex(canvas, onProgress, opts) {
+    opts = opts || {};
+    const worker = await getWorker(onProgress);
+    const W = canvas.width;
+    const H = canvas.height;
+    const long = Math.max(W, H);
+
+    // Grid: wide → 2x1; tall → 1x2; large/square → 2x2
+    let cols = 2;
+    let rows = 1;
+    if (W > H * 1.15) {
+      cols = 2;
+      rows = 1;
+    } else if (H > W * 1.15) {
+      cols = 1;
+      rows = 2;
+    } else {
+      cols = 2;
+      rows = 2;
+    }
+    // Very large images always 2x2
+    if (long >= 1600) {
+      cols = 2;
+      rows = 2;
+    }
+
+    // Overlap so text at tile borders is not cut
+    const overlap = Math.round(Math.min(W / cols, H / rows) * 0.08);
+    // Target long-side after upscale per tile (100%→~1.0 already large; force ≥1.6× for small tiles)
+    const tileW = Math.ceil(W / cols);
+    const tileH = Math.ceil(H / rows);
+    let up = opts.zoom || 2;
+    // If tile is already huge, cap zoom to avoid memory blowup
+    const tileLong = Math.max(tileW, tileH) * up;
+    if (tileLong > 2800) up = Math.max(1.2, 2800 / Math.max(tileW, tileH));
+    // Ensure small tiles get at least ~1600px on long side
+    const minUp = 1600 / Math.max(tileW, tileH);
+    if (up < minUp && minUp <= 3) up = Math.min(3, minUp);
+
+    const total = cols * rows;
+    let doneTiles = 0;
+    let allLines = [];
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const x0 = Math.max(0, Math.floor(c * tileW) - (c > 0 ? overlap : 0));
+        const y0 = Math.max(0, Math.floor(r * tileH) - (r > 0 ? overlap : 0));
+        const x1 = Math.min(W, Math.floor((c + 1) * tileW) + (c < cols - 1 ? overlap : 0));
+        const y1 = Math.min(H, Math.floor((r + 1) * tileH) + (r < rows - 1 ? overlap : 0));
+        const tw = x1 - x0;
+        const th = y1 - y0;
+        if (tw < 8 || th < 8) continue;
+
+        if (onProgress) {
+          onProgress({
+            status: "tile_" + (doneTiles + 1) + "_of_" + total,
+            progress: 0.05 + (doneTiles / total) * 0.85,
+          });
+        }
+
+        const tile = document.createElement("canvas");
+        tile.width = tw;
+        tile.height = th;
+        const tctx = tile.getContext("2d", { willReadFrequently: true });
+        tctx.imageSmoothingEnabled = true;
+        tctx.imageSmoothingQuality = "high";
+        tctx.drawImage(canvas, x0, y0, tw, th, 0, 0, tw, th);
+
+        const upTile = upscaleCanvas(tile, up);
+        const ocrIn = makeOcrCanvas(upTile);
+        const result = await worker.recognize(ocrIn);
+        const tileLines = extractLinesFromResult(
+          result && result.data,
+          upTile.width,
+          upTile.height,
+          40
+        );
+
+        // Map tile-local coords → full-image coords
+        for (let i = 0; i < tileLines.length; i++) {
+          const L = tileLines[i];
+          allLines.push({
+            x: x0 + L.x / up,
+            y: y0 + L.y / up,
+            w: L.w / up,
+            h: L.h / up,
+            fontHeight: L.fontHeight / up,
+            text: L.text,
+            parts: [],
+            conf: L.conf,
+          });
+        }
+        doneTiles++;
+      }
+    }
+
+    allLines = mergeLineLists([], allLines);
+    return { lines: allLines, words: [], text: allLines.map(function (l) { return l.text; }).join("\n") };
+  }
+
   function wrapText(ctx, text, maxWidth) {
     if (!text) return [];
     const chars = Array.from(text);
@@ -674,6 +779,7 @@
   global.ImageEngine = {
     loadFileToCanvas: loadFileToCanvas,
     ocrCanvas: ocrCanvas,
+    ocrCanvasComplex: ocrCanvasComplex,
     overlayLines: overlayLines,
     geminiExtractLines: geminiExtractLines,
     applyLocalGlossary: applyLocalGlossary,
