@@ -257,6 +257,52 @@ ok(
 );
 
 /* ============================================================
+ * 4b. 发布安全：仓库里不能带客户痕迹
+ *
+ * 这个仓库是要公开的（GitHub Pages），所以自带的那份术语表必须是**行业通用词**。
+ * 客户专有词、品牌名、客户原话放在仓库外的 glossary.local.txt，页面启动时加载。
+ * 这几条断言就是防止以后有人（包括我）又把客户词写回 config.js。
+ * ============================================================ */
+
+console.log("\n[4b] 发布安全（仓库里不带客户痕迹）");
+
+const configSrc = fs.readFileSync(path.join(JS_DIR, "config.js"), "utf8");
+const configCode = stripComments(configSrc);
+const leaked = DOMAIN_WORDS.filter(function (w) {
+  return configCode.indexOf(w) >= 0;
+});
+ok(
+  "自带术语表里没有品牌 / 角色词（它们应该只在 glossary.local.txt 里）",
+  leaked.length === 0,
+  leaked.length ? "泄漏：" + leaked.join(", ") : ""
+);
+
+// 客户原话的标志：以 Please / Kindly 开头的整句
+const sentenceHits = configCode
+  .split(/\r?\n/)
+  .filter(function (l) {
+    return /"(Please|Kindly)\s+[a-z]/i.test(l);
+  });
+ok(
+  "自带术语表里没有整句的客户原话（以 Please 开头的句子）",
+  sentenceHits.length === 0,
+  sentenceHits.slice(0, 3).join(" | ")
+);
+
+// 私有词表必须被 gitignore 挡住 —— 否则一个 git add -A 就把它推上去了
+const gitignore = fs.readFileSync(path.join(ROOT, ".gitignore"), "utf8");
+ok(
+  ".gitignore 挡住了本机私有术语表 glossary.local.txt",
+  /^\s*glossary\.local\.txt\s*$/m.test(gitignore),
+  "缺这一行的话，私有词表会被误提交"
+);
+ok(
+  ".gitignore 挡住了图片素材（客户资料不进仓库）",
+  /^\s*\*\.(jpg|jpeg|png)\s*$/m.test(gitignore),
+  "缺图片规则"
+);
+
+/* ============================================================
  * 5. 关键默认值必须合理
  * ============================================================ */
 

@@ -107,6 +107,8 @@
   const IMAGE_RE = /\.(png|jpe?g|webp|bmp|gif)$/i;
   const PDF_RE = /\.pdf$/i;
   const STORE_PREFIX = "pz3_";
+  // 本机私有术语表（仓库外，.gitignore 挡住了它）。见 loadLocalGlossary。
+  const LOCAL_GLOSSARY_FILE = "glossary.local.txt";
 
   // 预览画布的最大显示边长。原实现每次都把 3 倍分辨率的整页画进预览画布，
   // 悬停高亮时会卡；这里按显示尺寸重绘，高亮才能跟得上鼠标。
@@ -568,6 +570,34 @@
     if (!p) return;
     els.glossary.value = p.glossary || "";
     els.profileHint.value = p.hint || "";
+  }
+
+  /**
+   * 加载本机私有术语表（可选）。
+   *
+   * 为什么要有这个东西：真实术语表里往往带着客户的原话、品牌名、角色名，
+   * 而仓库是要公开的（GitHub Pages）。所以那份词表放在仓库外的
+   * `glossary.local.txt`（已在 .gitignore 里），页面启动时自己加载它，
+   * 覆盖「玩具 / 产品规格表」预设里那份通用词表。
+   *
+   * 拿不到就当没有 —— 别人机器上没有这个文件（404）、
+   * 用 file:// 打开时 fetch 被浏览器拦掉，这两种情况都必须安静跳过，
+   * 否则页面会因为一个可选文件而起不来。
+   */
+  function loadLocalGlossary() {
+    if (typeof fetch !== "function") return Promise.resolve(null);
+    return fetch(LOCAL_GLOSSARY_FILE, { cache: "no-store" })
+      .then(function (res) {
+        return res && res.ok ? res.text() : null;
+      })
+      .then(function (text) {
+        if (text == null) return null;
+        const t = String(text).trim();
+        return t ? t : null;
+      })
+      .catch(function () {
+        return null;
+      });
   }
 
   /* ============================================================
@@ -1704,9 +1734,28 @@
     showPanel("upload");
   }
 
+  /**
+   * 启动：先尝试加载本机私有术语表（可选，拿不到就跳过），再进 init。
+   *
+   * 顺序很重要 —— 必须在 init 之前替换掉预设，init 里
+   * loadProfileIntoFields() 才会把私有词表填进输入框。
+   */
+  function boot() {
+    loadLocalGlossary().then(function (local) {
+      if (local) {
+        const prof = C.PROFILES.toy_spec;
+        if (prof) {
+          prof.glossary = local;
+          prof.desc = "本机私有词表（glossary.local.txt 已加载，不进仓库）";
+        }
+      }
+      init();
+    });
+  }
+
   if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init);
+    document.addEventListener("DOMContentLoaded", boot);
   } else {
-    init();
+    boot();
   }
 })();

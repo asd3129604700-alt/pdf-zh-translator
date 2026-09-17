@@ -6,6 +6,9 @@ test-assets/
 samples/
 *.pdf
 
+# 本机私有术语表：含客户专有词/品牌/原话，绝不进仓库
+glossary.local.txt
+
 # 图片素材：仓库里只放代码，不放任何客户资料或截图
 *.jpg
 *.jpeg

@@ -203,76 +203,54 @@
    * 右侧留空或写「原样」表示该词保持原样不翻译。
    * ============================================================ */
 
-  const TOY_SPEC_GLOSSARY = [
+  /**
+   * 「玩具 / 产品规格表」预设自带的**通用**示例词表。
+   *
+   * ⚠ 这里只能放行业通用词汇 —— 仓库是要公开的（GitHub Pages）。
+   * 客户专有词、品牌名、客户原话一律不要写进这个文件，放到仓库外的
+   * `glossary.local.txt`（已在 .gitignore 里），页面启动时会自动加载并覆盖这份预设。
+   * 有回归测试守着这一条，见 test/test-api-shape.js 的「领域过拟合」一节。
+   */
+  const SPEC_SHEET_GLOSSARY = [
     "SEPARATE PIECE => 独立部件",
     "MATERIAL SPEC => 材质规格",
-    "MINI PLUSH => 迷你毛绒",
+    "MATERIALS => 材质",
     "PRINTED GRAPHIC => 印花图案",
     "EMBROIDERY => 刺绣",
     "APPLIQUE => 贴布绣",
     "GRADIENT => 渐变",
-    "PLAY PATTERN => 规格类型",
     "PRODUCT TITLE => 产品名称",
     "PRODUCT DIMS => 产品尺寸",
     "PACKAGING DIMS => 包装尺寸",
     "PIECE COUNT => 部件数量",
     "DEV. STAGE => 开发阶段",
-    "TRY ME => 试玩",
     "SEASON => 季度",
     "COMPLEXITY => 复杂度",
     "MATERIAL => 材质",
     "DECO => 装饰",
     "SCALE => 比例",
-    "Inflatable costume => 充气服饰",
-    "Mask/Body Feathers => 面具/身体羽毛",
-    "Beak Highlight => 喙高光",
-    "Beak Top => 喙顶部",
-    "Beak Inner => 喙内侧",
-    "Lower Beak => 下喙",
-    "Feathers => 羽毛",
+    "COLORS => 配色",
     "Polyester => 聚酯纤维",
-    "Materials => 材质",
-    "Colors => 配色",
-    "Pupils => 瞳孔",
-    "Costume => 服饰本体",
-    "Visor => 面罩/镜片",
-    "Jeans => 牛仔裤",
-    "Shoes => 鞋子",
-    "Feet => 脚部",
-    "Eyes => 眼睛",
-    "Body => 身体",
+    "Cotton => 棉",
     "Front => 正面",
     "Side => 侧面",
     "Back => 背面",
+    "Body => 身体",
+    "Eyes => 眼睛",
+    "Pupils => 瞳孔",
+    "Skin => 肤色",
+    "Sleeves => 袖子",
+    "Shoes => 鞋子",
     "Hair accessories => 发饰",
     "Hair Ribbon => 发带",
-    "Hairline => 发际线",
-    "HAIR/FACE EXAMPLE => 头发/面部示例",
-    "All Face Details => 全部面部细节",
-    "Front of Hair => 前发",
-    "Leg Covers => 腿套",
-    "Waist chain => 腰链",
-    "Earrings => 耳环",
-    "Necklace => 项链",
-    "Sleeves => 袖子",
-    "Dress collar leaves => 裙领叶片",
-    "Bodice ruffles, Outter & Inner Dress => 衣身荷叶边、外裙与内裙",
-    "Please use Silk/Sateen fabric for white outter dress => 白色外裙请使用丝绸/缎面面料",
-    "Please print graphic details but keep as separate piece => 请印制图案细节，但保持为独立部件",
-    "Please use same execution for hair & face embroidery & applique => 头发与面部刺绣、贴布请使用相同工艺",
-    "Please dye gradient on soft boa => 请在柔软仿毛皮上做渐变染色",
-    "Skin => 肤色",
     "Keep away from fire => 远离火源",
     "Not for children under 3 years => 不适合3岁以下儿童",
     "Proprietary and Confidential => 专有及保密文件",
     "All rights reserved => 保留所有权利",
     "Not to be distributed or reproduced without permission => 未经许可不得分发或复制",
-    // 品牌 / 角色 / 系统名：保持原样
-    "hololive => 原样",
-    "Jakks => 原样",
+    // 色号系统名：行业通用，保持原样
     "PANTONE => 原样",
     "PMS => 原样",
-    "TAKANASHI KIARA => 原样",
   ].join("\n");
 
   const PROFILES = {
@@ -289,8 +267,11 @@
       hint:
         "这是玩具或周边产品的规格图/工艺说明表，包含材质、配色、工艺（刺绣、贴布绣、印花）、" +
         "PMS 色号、尺寸标注。请按行业习惯用词。",
-      glossary: TOY_SPEC_GLOSSARY,
-      desc: "你原来用的那套词表（Duolingo / Hololive 相关系列），已整理成可编辑文本。",
+      glossary: SPEC_SHEET_GLOSSARY,
+      desc:
+        "玩具/周边产品的通用规格词表（材质、工艺、部件、尺寸）。" +
+        "要换成你自己的专有词表，就把仓库根目录的 glossary.local.txt 填上 —— " +
+        "它不会进仓库，页面启动时自动加载并覆盖这份预设。",
     },
     custom: {
       id: "custom",
