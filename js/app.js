@@ -35,6 +35,7 @@
     translateEngine: $("#opt-translate-engine"),
     translateEngineField: $("#translate-engine-field"),
     cover: $("#opt-cover"),
+    eraseMode: $("#opt-erase-mode"),
     preserveCodes: $("#opt-preserve-codes"),
     fieldColors: $("#opt-field-colors"),
 
@@ -581,6 +582,7 @@
     store("translate_engine", getTranslateEngine());
     store("target_lang", els.targetLang.value);
     store("cover", els.cover.checked ? "1" : "0");
+    store("erase_mode", els.eraseMode.value);
     store("preserve", els.preserveCodes.checked ? "1" : "0");
     store("field_colors", els.fieldColors.checked ? "1" : "0");
     store("vision_provider", els.visionProvider.value);
@@ -770,6 +772,8 @@
         maxGrowY: C.LIMITS.overlayMaxGrowY,
         minFontSize: C.LIMITS.overlayMinFontSize,
       minReadableSize: C.LIMITS.overlayMinReadableSize,
+      eraseMode: ctx.eraseMode,
+      eraseRingWidth: C.LIMITS.eraseRingWidth,
         signal: ctx.signal,
         onLog: ctx.log,
       });
@@ -1074,10 +1078,22 @@
       maxGrowY: C.LIMITS.overlayMaxGrowY,
       minFontSize: C.LIMITS.overlayMinFontSize,
       minReadableSize: C.LIMITS.overlayMinReadableSize,
+      eraseMode: ctx.eraseMode,
+      eraseRingWidth: C.LIMITS.eraseRingWidth,
       fieldColors: ctx.fieldColors,
       signal: ctx.signal,
       onLog: ctx.log,
     });
+
+    // 纯色填充的前提是"文字压在纯色底上"。底色不纯时它会留下一块看得见的色块，
+    // 这时要明确告诉用户换个方式，而不是默默交出一张有痕迹的图。
+    const ost = composed._overlayStats;
+    if (ost && ost.lowCoverage) {
+      warnings.push(
+        "有 " + ost.lowCoverage + " 处文字压在图案/渐变上，纯色填充在那里会留下一块色块。" +
+          "这类图可以把「去字方式」切到「智能修复」再试。"
+      );
+    }
 
     return { items: dd.items, composed: composed, warnings: warnings };
   }
@@ -1140,6 +1156,7 @@
       recognizeOnly: recognizeOnly,
       targetLang: els.targetLang.value,
       cover: els.cover.checked,
+      eraseMode: els.eraseMode.value || "fill",
       fieldColors: els.fieldColors.checked,
       glossary: glossaryEntries(),
       hint: profileHint(),
@@ -1512,6 +1529,7 @@
     });
     els.targetLang.addEventListener("change", savePrefs);
     els.cover.addEventListener("change", savePrefs);
+    els.eraseMode.addEventListener("change", savePrefs);
     els.preserveCodes.addEventListener("change", savePrefs);
     els.fieldColors.addEventListener("change", savePrefs);
 
@@ -1602,6 +1620,7 @@
     els.translateEngine.value = restore("translate_engine", "free");
     els.targetLang.value = restore("target_lang", "zh-CN");
     els.cover.checked = restore("cover", "1") === "1";
+    els.eraseMode.value = restore("erase_mode", "fill");
     els.preserveCodes.checked = restore("preserve", "1") === "1";
     // 字段配色默认关闭：它会改变原文档观感，不该默认生效
     els.fieldColors.checked = restore("field_colors", "0") === "1";

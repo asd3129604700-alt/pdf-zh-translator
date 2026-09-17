@@ -895,6 +895,9 @@
       inpainted: 0,
       inpaintPixels: 0,
       inpaintFallback: 0,
+      erasedByFill: 0,
+      erasedByRepair: 0,
+      lowCoverage: 0,
       failed: 0,
       ms: 0,
     };
@@ -1039,19 +1042,33 @@
         // 字色/底色深浅从**原图**采样（这张画布已经被涂改过，读它会串味）
         const bg = sampleBackground(srcCtx, cover, canvas.width, canvas.height);
 
-        // 去字：只擦"文字像素"，表格线、图案、纹理都保留，再用无缝扩散补回去。
-        // 失败时（这块里根本没识别出文字像素）退回整体填充，至少保证原文被盖住。
+        // 去字：
+        //  · fill   —— 采背景主色，把整块实心填掉。**保证零残留**，
+        //               文字压在纯色底上时看不出痕迹（用户点名要这个）
+        //  · repair —— 只擦文字像素再用扩散补回去，背景有图案/渐变时更自然，
+        //               但依赖掩膜判断，判错会留残留
         let coverOk = false;
         if (global.PZInpaint && opts.inpaint !== false) {
           const inp = global.PZInpaint.coverText(srcCtx, ctx, cover, {
+            mode: opts.eraseMode,
+            ringWidth: opts.eraseRingWidth,
             contrast: opts.inkContrast,
             dilate: opts.inpaintDilate,
             minMaskRatio: opts.inpaintMinMaskRatio,
+            fillColor: opts.eraseFillColor,
           });
           coverOk = !!inp.ok;
           if (coverOk) {
             stats.inpainted++;
-            stats.inpaintPixels += inp.maskCount;
+            if (inp.mode === "fill") {
+              stats.erasedByFill++;
+              // 底色不纯（压在图案/渐变上）时纯色填充会是一块看得见的色块，
+              // 记下来报给用户，而不是默默交出一张有痕迹的图
+              if (inp.coverage < 0.7) stats.lowCoverage++;
+            } else {
+              stats.erasedByRepair++;
+              stats.inpaintPixels += inp.maskCount || 0;
+            }
           } else {
             stats.inpaintFallback++;
           }

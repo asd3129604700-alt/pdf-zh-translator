@@ -508,53 +508,173 @@
   }
 
   /* ============================================================
-   * 高层入口：对画布上的一块矩形做"文字掩膜 + 无缝修复"
+   * 背景主色：取"环上出现最多的那个颜色"
+   * ============================================================ */
+
+  /**
+   * 找出出现次数最多的颜色（量化后统计）。
+   *
+   * 为什么用**众数**而不是中位数/均值：环上难免扫到一点别的东西
+   * （相邻的图案、另一行字的边缘），中位数会被拉偏，均值更是被平均掉。
+   * 众数问的是"这一圈里最常见的颜色是哪个"，那才是背景色。
+   *
+   * pixels: [[r,g,b], ...]
+   * 返回 { color: [r,g,b], coverage: 0..1, unique: 桶数 }
+   */
+  function dominantColor(pixels, opts) {
+    opts = opts || {};
+    const step = opts.quantStep || 16; // 量化步长：抗 JPEG 噪声
+    if (!pixels || !pixels.length) return { color: [255, 255, 255], coverage: 0, unique: 0 };
+
+    const buckets = new Map();
+    for (let i = 0; i < pixels.length; i++) {
+      const c = pixels[i];
+      const key =
+        ((c[0] / step) | 0) * 4096 + ((c[1] / step) | 0) * 64 + ((c[2] / step) | 0);
+      let b = buckets.get(key);
+      if (!b) {
+        b = { n: 0, r: 0, g: 0, bl: 0 };
+        buckets.set(key, b);
+      }
+      b.n++;
+      b.r += c[0];
+      b.g += c[1];
+      b.bl += c[2];
+    }
+
+    let best = null;
+    buckets.forEach(function (b) {
+      if (!best || b.n > best.n) best = b;
+    });
+    return {
+      color: [Math.round(best.r / best.n), Math.round(best.g / best.n), Math.round(best.bl / best.n)],
+      coverage: best.n / pixels.length,
+      unique: buckets.size,
+    };
+  }
+
+  /**
+   * 采集矩形**外侧一环**的像素（不含矩形内部）。
+   * 内外一起读一次，比多次 getImageData 便宜。
+   */
+  function collectRing(img, inner, ring) {
+    const out = [];
+    const d = img.data;
+    const W = img.width;
+    const H = img.height;
+    for (let y = 0; y < H; y++) {
+      const inY = y >= inner.y && y < inner.y + inner.h;
+      for (let x = 0; x < W; x++) {
+        if (inY && x >= inner.x && x < inner.x + inner.w) continue; // 矩形内部跳过
+        // 只取紧贴矩形的几圈，太远的样本可能已经是别的东西了
+        const dx = Math.max(inner.x - x, x - (inner.x + inner.w - 1), 0);
+        const dy = Math.max(inner.y - y, y - (inner.y + inner.h - 1), 0);
+        if (Math.max(dx, dy) > ring) continue;
+        const o = (y * W + x) * 4;
+        out.push([d[o], d[o + 1], d[o + 2]]);
+      }
+    }
+    return out;
+  }
+
+  /* ============================================================
+   * 高层入口：擦掉一块矩形里的原文
    * ============================================================ */
 
   /**
    * srcCtx: 读**原图**的上下文（必须是没被涂改过的）
    * dstCtx: 写结果的上下文（通常是正在画的那张画布）
    * rect:   {x, y, w, h} 画布像素坐标
-   * opts:   { contrast, dilate, minMaskRatio }
+   * opts:   { mode: "fill" | "repair", ringWidth, contrast, dilate, minMaskRatio }
    *
-   * 为什么读写分开：掩膜必须从**原图**建。如果从正在涂改的画布上读，
+   * 两种模式：
+   *  · **fill（默认，用户点名要的做法）**：采一圈背景主色，把整块**实心填掉**。
+   *    优点是**保证零残留** —— 不做掩膜就没有"某个连通块被误判成图案、
+   *    结果没擦掉"的风险。文字压在纯色/近似纯色底上时看不出任何痕迹。
+   *  · **repair**：文字掩膜 + 无缝修复。背景是渐变、图案、纹理时更自然，
+   *    但依赖掩膜判断得准；判错就会留残留。
+   *
+   * 为什么读写分开：掩膜与背景色都必须从**原图**取。如果从正在涂改的画布上读，
    * 前面画好的中文会被当成"文字"混进掩膜，然后被自己擦掉。
    *
-   * 返回 { ok, maskCount, ratio, filled, iterations } 或 { ok:false, reason }
+   * 返回 { ok, mode, fill, coverage, maskCount?, filled?, iterations? }
    */
   function coverText(srcCtx, dstCtx, rect, opts) {
     opts = opts || {};
+    const mode = opts.mode === "repair" ? "repair" : "fill";
+    const ring = opts.ringWidth == null ? 6 : opts.ringWidth;
     const W = srcCtx.canvas.width;
     const H = srcCtx.canvas.height;
-    const x0 = U.clamp(Math.floor(rect.x), 0, W);
-    const y0 = U.clamp(Math.floor(rect.y), 0, H);
-    const x1 = U.clamp(Math.ceil(rect.x + rect.w), x0 + 1, W);
-    const y1 = U.clamp(Math.ceil(rect.y + rect.h), y0 + 1, H);
-    const rw = x1 - x0;
-    const rh = y1 - y0;
-    if (rw < 3 || rh < 3) return { ok: false, reason: "too-small" };
+
+    // 内矩形 = 要擦掉的区域；外矩形 = 内矩形 + 一圈，用来采背景色
+    const ix0 = U.clamp(Math.floor(rect.x), 0, W);
+    const iy0 = U.clamp(Math.floor(rect.y), 0, H);
+    const ix1 = U.clamp(Math.ceil(rect.x + rect.w), ix0 + 1, W);
+    const iy1 = U.clamp(Math.ceil(rect.y + rect.h), iy0 + 1, H);
+    const innerW = ix1 - ix0;
+    const innerH = iy1 - iy0;
+    if (innerW < 3 || innerH < 3) return { ok: false, reason: "too-small" };
+
+    const ox0 = U.clamp(ix0 - ring, 0, W);
+    const oy0 = U.clamp(iy0 - ring, 0, H);
+    const ox1 = U.clamp(ix1 + ring, ox0 + 1, W);
+    const oy1 = U.clamp(iy1 + ring, oy0 + 1, H);
 
     let img;
     try {
-      img = srcCtx.getImageData(x0, y0, rw, rh);
+      img = srcCtx.getImageData(ox0, oy0, ox1 - ox0, oy1 - oy0);
     } catch (e) {
       return { ok: false, reason: "read-failed" };
     }
 
-    const built = buildMask(img, opts);
+    // 内矩形在外矩形里的相对位置
+    const inner = { x: ix0 - ox0, y: iy0 - oy0, w: innerW, h: innerH };
 
-    // 掩膜太稀疏说明这块里没有按预期识别出文字（可能整块都是图案/色块），
-    // 这时不要乱擦：交给调用方走"整体填充"的老路，至少保证原文被盖住。
-    const ratio = built.count / (rw * rh);
+    // ---------- 采背景主色 ----------
+    const ringPixels = collectRing(img, inner, ring);
+    const dom = dominantColor(ringPixels, { quantStep: opts.quantStep });
+    const fillColor = opts.fillColor || dom.color;
+
+    if (mode === "fill") {
+      const d = img.data;
+      const iw = img.width;
+      for (let y = inner.y; y < inner.y + inner.h; y++) {
+        for (let x = inner.x; x < inner.x + inner.w; x++) {
+          const o = (y * iw + x) * 4;
+          d[o] = fillColor[0];
+          d[o + 1] = fillColor[1];
+          d[o + 2] = fillColor[2];
+        }
+      }
+      dstCtx.putImageData(img, ox0, oy0);
+      return {
+        ok: true,
+        mode: "fill",
+        fill: fillColor,
+        // 主色占环上样本的比例。接近 1 说明底色确实纯，填出来看不出痕迹；
+        // 偏低说明这块压在图案/渐变上，纯色填充会是一块看得见的色块。
+        coverage: dom.coverage,
+        unique: dom.unique,
+        innerW: innerW,
+        innerH: innerH,
+      };
+    }
+
+    // ---------- repair：只擦文字像素，再用扩散补回去 ----------
+    const built = buildMask(img, opts);
+    const ratio = built.count / (innerW * innerH);
     if (built.count === 0 || ratio < (opts.minMaskRatio == null ? 0.004 : opts.minMaskRatio)) {
       return { ok: false, reason: "no-text-mask", maskCount: built.count, ratio: ratio };
     }
 
     const filled = inpaint(img, built.mask, opts);
-    dstCtx.putImageData(img, x0, y0);
+    dstCtx.putImageData(img, ox0, oy0);
 
     return {
       ok: true,
+      mode: "repair",
+      fill: fillColor,
+      coverage: dom.coverage,
       maskCount: built.count,
       ratio: ratio,
       kept: built.kept,
@@ -569,6 +689,8 @@
     buildMask: buildMask,
     inpaint: inpaint,
     coverText: coverText,
+    dominantColor: dominantColor,
+    collectRing: collectRing,
     eachComponent: eachComponent,
     luminanceOf: luminanceOf,
   };

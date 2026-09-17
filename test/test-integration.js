@@ -585,18 +585,24 @@ console.log("\n[6] 排版引擎的覆盖范围（render 端到端）");
 
   // --- 正常覆盖 ---
   {
+    // 覆盖范围改成从 onCover 拿：去字走的是 putImageData（纯色填充 / 掩膜修复），
+    // 不再刷 fillRect，所以不能再靠数 fills 来判断范围。
+    const covers = [];
     const out = OV.render(source, [{ x: 10, y: 10, w: 100, h: 20, src: "Material", dst: "材质" }], {
       cover: true,
       maxGrowY: 1.35,
       minFontSize: 6,
+      onCover: function (cov) {
+        covers.push(cov);
+      },
     });
     const ctx = out.getContext();
-    ok("画了一次底色", ctx.fills.length === 1, "fills=" + ctx.fills.length);
+    ok("覆盖了一次", covers.length === 1, "covers=" + covers.length);
     ok("写了一次文字", ctx.texts.length === 1, "texts=" + ctx.texts.length);
     ok("调用过 clip（保证不越界绘制）", ctx.clips.length === 1);
     ok("统计里 drawn = 1", out._overlayStats.drawn === 1);
 
-    const f = ctx.fills[0];
+    const f = covers[0];
     const soloLim = OV.computeNeighborLimits([{ x: 10, y: 10, w: 100, h: 20 }], 400, 300, {
       maxGrowY: 1.35,
       gap: 3,
@@ -605,7 +611,7 @@ console.log("\n[6] 排版引擎的覆盖范围（render 端到端）");
     ok(
       "覆盖范围被夹在邻居允许的边界内（容忍 1px 取整误差）",
       f.y >= soloLim.top - 1 && f.y + f.h <= soloLim.bottom + 1,
-      "fill y=" + f.y.toFixed(2) + " 底=" + (f.y + f.h).toFixed(2) +
+      "cover y=" + f.y.toFixed(2) + " 底=" + (f.y + f.h).toFixed(2) +
         "，允许区间 [" + soloLim.top.toFixed(2) + ", " + soloLim.bottom.toFixed(2) + "]"
     );
     ok("覆盖范围至少包含原文框", f.y <= 10 && f.y + f.h >= 30, "y=" + f.y.toFixed(2) + " bot=" + (f.y + f.h).toFixed(2));
@@ -624,12 +630,19 @@ console.log("\n[6] 排版引擎的覆盖范围（render 端到端）");
       { x: 10, y: 10, w: 100, h: 20, src: "short", dst: "这是一段非常长的中文译文需要占很多空间" },
       { x: 10, y: 34, w: 100, h: 20, src: "second", dst: "第二行" },
     ];
-    const out = OV.render(source, items, { cover: true, maxGrowY: 1.35, minFontSize: 6 });
-    const ctx = out.getContext();
+    const covers = [];
+    const out = OV.render(source, items, {
+      cover: true,
+      maxGrowY: 1.35,
+      minFontSize: 6,
+      onCover: function (cov) {
+        covers.push(cov);
+      },
+    });
 
-    ok("两条都画了", ctx.fills.length === 2, "fills=" + ctx.fills.length);
-    const a = ctx.fills[0];
-    const b = ctx.fills[1];
+    ok("两条都覆盖了", covers.length === 2, "covers=" + covers.length);
+    const a = covers[0];
+    const b = covers[1];
     ok(
       "长译文的覆盖范围没有碰到下一行的框（y=34）",
       a.y + a.h <= 34,
@@ -858,14 +871,23 @@ console.log("\n[7] 端到端：检测几何 → 排版（不用手搓框）");
       return { x: l.x, y: l.y, w: l.w, h: l.h, src: "line " + i, dst: zh[i] };
     });
 
-    const out = OV.render(source, items, { cover: true, maxGrowY: 1.35, minFontSize: 6 });
+    // 覆盖范围从 onCover 拿：去字不再刷 fillRect
+    const covers = [];
+    const out = OV.render(source, items, {
+      cover: true,
+      maxGrowY: 1.35,
+      minFontSize: 6,
+      onCover: function (cov) {
+        covers.push(cov);
+      },
+    });
     const ctx = out.getContext();
 
-    ok("6 行都产生了覆盖绘制", ctx.fills.length === 6, "fills=" + ctx.fills.length);
+    ok("6 行都产生了覆盖范围", covers.length === 6, "covers=" + covers.length);
     ok("统计 drawn = 6", out._overlayStats.drawn === 6, JSON.stringify(out._overlayStats));
 
     // 核心断言：相邻两行的覆盖矩形不能重叠，否则就是"压字"
-    const sorted = ctx.fills.slice().sort(function (a, b) {
+    const sorted = covers.slice().sort(function (a, b) {
       return a.y - b.y;
     });
     let worstOverlap = 0;
@@ -884,7 +906,7 @@ console.log("\n[7] 端到端：检测几何 → 排版（不用手搓框）");
     // 覆盖矩形不能越出画布
     ok(
       "覆盖矩形都在画布范围内",
-      ctx.fills.every(function (f) {
+      covers.every(function (f) {
         return f.y >= -0.5 && f.y + f.h <= H + 0.5 && f.x >= -0.5 && f.x + f.w <= W + 0.5;
       })
     );
@@ -894,7 +916,7 @@ console.log("\n[7] 端到端：检测几何 → 排版（不用手搓框）");
     ok(
       "写出的中文都落在对应的覆盖矩形内（横向）",
       ctx.texts.every(function (t) {
-        return ctx.fills.some(function (f) {
+        return covers.some(function (f) {
           return t.x >= f.x - 1 && t.x <= f.x + f.w;
         });
       })
@@ -1188,18 +1210,90 @@ console.log("\n[8] 去字：文字掩膜 + 无缝修复");
     ok("端到端：统计里记了走的是修复路径", out._overlayStats.inpainted === 1, JSON.stringify(out._overlayStats));
   }
 
-  // ---------- 掩膜为空时退回整体填充，保证原文一定被盖住 ----------
+  // ---------- 纯色填充：零残留（这是用户点名要的做法） ----------
+  {
+    // 主色识别：环上混入 10% 杂色也要取对
+    const px = [];
+    for (let i = 0; i < 90; i++) px.push([240, 240, 240]);
+    for (let i = 0; i < 10; i++) px.push([10, 20, 30]);
+    const dom = INK.dominantColor(px, {});
+    ok(
+      "背景主色：环上混入 10% 杂色仍取对主色（用众数而不是均值）",
+      dom.color[0] > 220 && dom.color[1] > 220 && dom.coverage >= 0.85,
+      JSON.stringify(dom)
+    );
+  }
+
   {
     const cv = makeSoftCanvas(W, H);
-    paint(cv, { x: 100, y: 40, w: 40, h: 20 }, [0, 0, 0]);
-    // 传一个完全落在空白处的框：那里没有文字掩膜
-    const item = { x: 200, y: 80, w: 40, h: 20, src: "X", dst: "叉" };
-    const out = globalThis.PZOverlay.render(cv, [item], { cover: true, minFontSize: 6 });
+    // 浅灰纸底 + 三段黑字（不要纯白，纯白测不出"填错颜色"）
+    paint(cv, { x: 0, y: 0, w: W, h: H }, [238, 238, 238]);
+    paint(cv, { x: 40, y: 28, w: 9, h: 12 }, [0, 0, 0]);
+    paint(cv, { x: 53, y: 28, w: 9, h: 12 }, [0, 0, 0]);
+    paint(cv, { x: 66, y: 28, w: 9, h: 12 }, [0, 0, 0]);
+
+    let coverRect = null;
+    const item = { x: 38, y: 26, w: 40, h: 16, src: "LABEL", dst: "标签" };
+    const out = globalThis.PZOverlay.render(cv, [item], {
+      cover: true,
+      eraseMode: "fill",
+      minFontSize: 6,
+      onCover: function (cov) {
+        coverRect = cov;
+      },
+    });
+
+    ok("纯色填充：走的是 fill 路径", out._overlayStats.erasedByFill === 1, JSON.stringify(out._overlayStats));
+    ok("纯色填充：底色纯（coverage 高）", out._overlayStats.lowCoverage === 0);
+
+    // 关键断言：覆盖区域里一个暗像素都不该剩。
+    // 测试里的 fillText 是空实现（不真的画字），所以残留必须严格为 0 ——
+    // 这就把"擦干净"和"擦一半留残影"彻底分开了。
+    let dark = 0;
+    let sum = 0;
+    let cnt = 0;
+    for (let y = Math.round(coverRect.y); y < coverRect.y + coverRect.h; y++) {
+      for (let x = Math.round(coverRect.x); x < coverRect.x + coverRect.w; x++) {
+        const p = readPx(out, x, y);
+        const l = (p[0] + p[1] + p[2]) / 3;
+        sum += l;
+        cnt++;
+        if (l < 120) dark++;
+      }
+    }
     ok(
-      "掩膜为空时退回整体填充（保证原文被盖住，不会留英文）",
-      out._overlayStats.inpaintFallback === 1,
-      JSON.stringify(out._overlayStats)
+      "纯色填充：覆盖区域里**零残留**（一个暗像素都没有）",
+      dark === 0,
+      "残留 " + dark + " / " + cnt + " px"
     );
+    ok(
+      "纯色填充：填的是背景色（浅灰 238），不是白的 —— 不会像涂改液那样比纸更白",
+      Math.abs(sum / cnt - 238) < 4,
+      "填充区平均亮度 " + (sum / cnt).toFixed(1) + "，背景 238"
+    );
+  }
+
+  // ---------- 智能修复：背景不纯时用它 ----------
+  {
+    const cv = makeSoftCanvas(W, H);
+    paint(cv, { x: 0, y: 0, w: W, h: H }, [238, 238, 238]);
+    // 文字压在一块彩色区域上（模拟玩偶图案）
+    paint(cv, { x: 30, y: 20, w: 60, h: 30 }, [200, 80, 60]);
+    paint(cv, { x: 40, y: 28, w: 9, h: 12 }, [0, 0, 0]);
+    paint(cv, { x: 53, y: 28, w: 9, h: 12 }, [0, 0, 0]);
+
+    const item = { x: 38, y: 26, w: 40, h: 16, src: "LABEL", dst: "标签" };
+    const out = globalThis.PZOverlay.render(cv, [item], {
+      cover: true,
+      eraseMode: "repair",
+      minFontSize: 6,
+    });
+    ok("智能修复：走的是 repair 路径", out._overlayStats.erasedByRepair === 1, JSON.stringify(out._overlayStats));
+
+    // 修复后文字位置应当是彩色区域的过渡色，而不是黑
+    const p = readPx(out, 44, 34);
+    const l = (p[0] + p[1] + p[2]) / 3;
+    ok("智能修复：原文被擦掉（不再是黑）", l > 60, "亮度 " + l.toFixed(0));
   }
 
   U.setCanvasFactory(null);
@@ -1736,14 +1830,13 @@ console.log("\n[11] 端到端去重（模拟视觉模型两遍返回同一处）
   });
   ok("修复后同一处只画一次", afterTexts.length === 1, "画了 " + afterTexts.length + " 次");
   ok("不相干的那处照常画", otherTexts.length === 1, "画了 " + otherTexts.length + " 次");
-  // 去重后两条 item 各处理一次：有原文墨迹的那条走"掩膜 + 修复"（不刷整块补丁），
-  // 没有墨迹的那条走整体填充兜底。
-  // （原来这里数 fillRect 次数；现在有墨迹的走修复路径、不刷补丁了，所以看统计。）
+  // 去重后两条 item 各处理一次。默认是「纯色填充」模式，两条都走 fill 路径 ——
+  // 这一条断言的是"每条都真的被擦过"，而不是"用哪种方式擦的"。
   const st = after._overlayStats;
   ok("覆盖：两条 item 各处理一次，没有重复覆盖", st.drawn === 2, "drawn=" + st.drawn);
   ok(
-    "覆盖：有原文的那条走修复路径，不刷整块补丁",
-    st.inpainted === 1 && st.inpaintFallback === 1,
+    "覆盖：两条都走了去字（默认纯色填充），没有漏掉",
+    st.inpainted === 2 && st.inpaintFallback === 0,
     "inpainted=" + st.inpainted + " fallback=" + st.inpaintFallback
   );
 
