@@ -234,6 +234,63 @@
     return blocks;
   }
 
+  /**
+   * 同一处文字只保留一条 —— 用几何判据，与文本像不像无关。
+   *
+   * 为什么不能只靠文本比对：短标签（比如 "Skirt"）在不同缩放下认出来可能差
+   * 一个字母，相似度就掉到阈值以下，两条都留下来 → 中文在几乎同一个位置
+   * 画两遍，看起来像"翻译了两次"。而几何位置是最可靠的证据。
+   *
+   * 判据：重叠比例够大（>0.55），或者重叠一般但中心几乎重合且尺寸接近。
+   * 保留"信息更完整"的那条：优先带译文的，其次面积更大的。
+   *
+   * 返回 { items, merged }，merged 是合并掉的条数（用来在日志里报出来）。
+   */
+  function dedupeOverlappingItems(items, opts) {
+    opts = opts || {};
+    const strongOv = opts.strongOverlap == null ? 0.55 : opts.strongOverlap;
+    const weakOv = opts.weakOverlap == null ? 0.3 : opts.weakOverlap;
+
+    const out = [];
+    let merged = 0;
+
+    for (let i = 0; i < (items || []).length; i++) {
+      const a = items[i];
+      let hit = -1;
+      for (let j = 0; j < out.length; j++) {
+        const b = out[j];
+        const ov = overlapRatio(a, b);
+        if (ov > strongOv) {
+          hit = j;
+          break;
+        }
+        if (ov > weakOv) {
+          const ca = boxCenter(a);
+          const cb = boxCenter(b);
+          if (
+            Math.abs(ca.x - cb.x) < Math.max(a.w, b.w) * 0.35 &&
+            Math.abs(ca.y - cb.y) < Math.max(a.h, b.h) * 0.5
+          ) {
+            hit = j;
+            break;
+          }
+        }
+      }
+
+      if (hit < 0) {
+        out.push(a);
+        continue;
+      }
+      merged++;
+      const b = out[hit];
+      const aBetter =
+        (a.dst && !b.dst) || (!!a.dst === !!b.dst && a.w * a.h > b.w * b.h);
+      if (aBetter) out[hit] = a;
+    }
+
+    return { items: out, merged: merged };
+  }
+
   /* ============================================================
    * 文本比对
    * ============================================================ */
@@ -591,6 +648,7 @@
     boxCenter: boxCenter,
     containsPoint: containsPoint,
     groupBoxesIntoBlocks: groupBoxesIntoBlocks,
+    dedupeOverlappingItems: dedupeOverlappingItems,
     // 文本
     normText: normText,
     similarity: similarity,

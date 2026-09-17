@@ -36,6 +36,7 @@
     translateEngineField: $("#translate-engine-field"),
     cover: $("#opt-cover"),
     preserveCodes: $("#opt-preserve-codes"),
+    fieldColors: $("#opt-field-colors"),
 
     visionBox: $("#vision-box"),
     visionProvider: $("#opt-vision-provider"),
@@ -577,6 +578,7 @@
     store("target_lang", els.targetLang.value);
     store("cover", els.cover.checked ? "1" : "0");
     store("preserve", els.preserveCodes.checked ? "1" : "0");
+    store("field_colors", els.fieldColors.checked ? "1" : "0");
     store("vision_provider", els.visionProvider.value);
     store("vision_base", els.visionBase.value);
     store("vision_key", els.visionKey.value);
@@ -867,7 +869,7 @@
       const a = allRegions[i];
       let dup = false;
       for (let j = 0; j < regions.length; j++) {
-        if (U.overlapRatio(regions[j], a) > 0.6) {
+        if (U.overlapRatio(regions[j], a) > 0.4) {
           dup = true;
           break;
         }
@@ -1052,17 +1054,26 @@
       }
     }
 
+    // ---------- 最终去重 ----------
+    // 必须在排版前做：重叠的两条会让中文在几乎同一个位置画两遍，
+    // 看起来就是"翻译了两次"。
+    const dd = U.dedupeOverlappingItems(items);
+    if (dd.merged) {
+      ctx.log("  合并了 " + dd.merged + " 条重复识别（同一处被检出多次）");
+    }
+
     // ---------- 排版 ----------
     ctx.step("compose");
-    const composed = OV.render(canvas, items, {
+    const composed = OV.render(canvas, dd.items, {
       cover: ctx.cover,
       maxGrowY: C.LIMITS.overlayMaxGrowY,
       minFontSize: C.LIMITS.overlayMinFontSize,
+      fieldColors: ctx.fieldColors,
       signal: ctx.signal,
       onLog: ctx.log,
     });
 
-    return { items: items, composed: composed, warnings: warnings };
+    return { items: dd.items, composed: composed, warnings: warnings };
   }
 
   async function processImageFile(file, ctx) {
@@ -1123,6 +1134,7 @@
       recognizeOnly: recognizeOnly,
       targetLang: els.targetLang.value,
       cover: els.cover.checked,
+      fieldColors: els.fieldColors.checked,
       glossary: glossaryEntries(),
       hint: profileHint(),
       vision: visionConfig(),
@@ -1481,6 +1493,7 @@
     els.targetLang.addEventListener("change", savePrefs);
     els.cover.addEventListener("change", savePrefs);
     els.preserveCodes.addEventListener("change", savePrefs);
+    els.fieldColors.addEventListener("change", savePrefs);
 
     els.profile.addEventListener("change", function () {
       loadProfileIntoFields(els.profile.value);
@@ -1564,6 +1577,8 @@
     els.targetLang.value = restore("target_lang", "zh-CN");
     els.cover.checked = restore("cover", "1") === "1";
     els.preserveCodes.checked = restore("preserve", "1") === "1";
+    // 字段配色默认关闭：它会改变原文档观感，不该默认生效
+    els.fieldColors.checked = restore("field_colors", "0") === "1";
     els.visionRecognizeOnly.checked = restore("vision_recog_only", "0") === "1";
 
     // 供应商

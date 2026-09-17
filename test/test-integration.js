@@ -1257,6 +1257,176 @@ console.log("\n[9] 实测框内几何（字号 / 对齐的依据）");
 }
 
 /* ============================================================
+ * 10. 对齐推断 / 字距适配 / 字段分类 / 去重
+ * ============================================================ */
+
+console.log("\n[10] 排版质量与去重");
+
+{
+  const OV = globalThis.PZOverlay;
+  const U = globalThis.PZUtil;
+
+  function inkCtx(W, H, rects) {
+    function isInk(x, y) {
+      for (let i = 0; i < rects.length; i++) {
+        const r = rects[i];
+        if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return true;
+      }
+      return false;
+    }
+    return {
+      getImageData: function (x, y, w, h) {
+        const data = new Uint8ClampedArray(Math.max(0, w * h * 4));
+        for (let yy = 0; yy < h; yy++) {
+          for (let xx = 0; xx < w; xx++) {
+            const o = (yy * w + xx) * 4;
+            const v = isInk(x + xx, y + yy) ? 0 : 255;
+            data[o] = v;
+            data[o + 1] = v;
+            data[o + 2] = v;
+            data[o + 3] = 255;
+          }
+        }
+        return { width: w, height: h, data: data };
+      },
+    };
+  }
+
+  // ---------- 对齐推断 ----------
+  {
+    // 单行 + 左右留白对称 → 居中
+    let ctx = inkCtx(400, 100, [{ x: 80, y: 26, w: 40, h: 8 }]);
+    let m = OV.measureInk(ctx, { x: 0, y: 20, w: 200, h: 20 }, 400, 100, {});
+    ok("对齐：单行左右留白对称 → center", m && m.alignment === "center", m && m.alignment);
+
+    // 单行 + 右边贴边 → 左对齐
+    ctx = inkCtx(400, 100, [{ x: 10, y: 26, w: 60, h: 8 }]);
+    m = OV.measureInk(ctx, { x: 0, y: 20, w: 200, h: 20 }, 400, 100, {});
+    ok("对齐：单行左贴边 → left", m && m.alignment === "left", m && m.alignment);
+
+    // 单行 + 左边留白远大于右边 → 右对齐
+    ctx = inkCtx(400, 100, [{ x: 150, y: 26, w: 40, h: 8 }]);
+    m = OV.measureInk(ctx, { x: 0, y: 20, w: 260, h: 20 }, 400, 100, {});
+    ok("对齐：单行左留白远大于右 → right", m && m.alignment === "right", m && m.alignment);
+
+    // 多行 + 左边缘齐 → 左对齐
+    ctx = inkCtx(400, 120, [
+      { x: 40, y: 24, w: 60, h: 8 },
+      { x: 40, y: 44, w: 40, h: 8 },
+    ]);
+    m = OV.measureInk(ctx, { x: 20, y: 20, w: 200, h: 40 }, 400, 120, {});
+    ok("对齐：多行左边缘齐 → left", m && m.alignment === "left", m && m.alignment);
+
+    // 多行 + 中心齐 → 居中
+    ctx = inkCtx(400, 120, [
+      { x: 50, y: 24, w: 60, h: 8 },
+      { x: 40, y: 44, w: 80, h: 8 },
+    ]);
+    m = OV.measureInk(ctx, { x: 20, y: 20, w: 200, h: 40 }, 400, 120, {});
+    ok("对齐：多行中心齐 → center", m && m.alignment === "center", m && m.alignment);
+
+    // 多行 + 右边缘齐 → 右对齐
+    ctx = inkCtx(400, 120, [
+      { x: 60, y: 24, w: 40, h: 8 },
+      { x: 40, y: 44, w: 60, h: 8 },
+    ]);
+    m = OV.measureInk(ctx, { x: 20, y: 20, w: 200, h: 40 }, 400, 120, {});
+    ok("对齐：多行右边缘齐 → right", m && m.alignment === "right", m && m.alignment);
+  }
+
+  // ---------- 字距适配：宁可收紧字距，也不掉一档字号 ----------
+  {
+    // 假 measurer：中文 1 em / 西文 0.55 em，字距按 spacing × fontSize × (字符数-1)
+    const measure = function (s, fs, sp) {
+      let w = 0;
+      for (const ch of String(s)) {
+        w += /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(ch) ? fs : fs * 0.55;
+      }
+      if (sp) w += sp * fs * Math.max(0, Array.from(String(s)).length - 1);
+      return w;
+    };
+
+    // 7 个汉字，框宽 150：字号 22 时自然宽度 154 放不下，
+    // 收紧字距到 -0.04 是 148.7 → 能放下。不掉到 20 号。
+    const laid = OV.layoutText(measure, "中文中文中文中", { x: 0, y: 0, w: 150, h: 24 }, {
+      minFontSize: 6,
+      allowH: 40,
+    });
+    ok(
+      "字距：靠收紧字距保住了更大的字号（22，而不是掉到 20）",
+      laid.fontSize === 22,
+      "实际字号 " + laid.fontSize
+    );
+    ok("字距：标记了 tightened", laid.tightened === true, "spacing=" + laid.spacing);
+    ok("字距：收紧后宽度确实落回框内", laid.widest <= 150.5, "widest=" + laid.widest.toFixed(1));
+
+    // 本来就能放下时不该乱收字距
+    const laid2 = OV.layoutText(measure, "中文", { x: 0, y: 0, w: 100, h: 20 }, {
+      minFontSize: 6,
+      allowH: 30,
+    });
+    ok("字距：能正常放下时不收紧", laid2.tightened === false, "spacing=" + laid2.spacing);
+  }
+
+  // ---------- 行高收紧 ----------
+  {
+    const measure = function (s, fs) {
+      return String(s).length * fs;
+    };
+    const laid = OV.layoutText(measure, "中文中文中文中文中文中文", { x: 0, y: 0, w: 40, h: 12 }, {
+      minFontSize: 6,
+      allowH: 200,
+    });
+    ok(
+      "行高：默认行高比例已收紧到 1.05 以下（原来是 1.16，排出来松垮）",
+      laid.lineHeight / laid.fontSize <= 1.05,
+      "实际比例 " + (laid.lineHeight / laid.fontSize).toFixed(3)
+    );
+  }
+
+  // ---------- 字段分类 ----------
+  {
+    ok("分类：型号色号 → code", OV.classifyField("PMS 1234 C") === "code" && OV.classifyField("SKU: 11227J") === "code");
+    ok("分类：纯数值 → code", OV.classifyField("45 in") === "code" && OV.classifyField("100%") === "code");
+    ok("分类：全大写短标签 → label", OV.classifyField("SEPARATE PIECE") === "label" && OV.classifyField("EMBROIDERY") === "label");
+    ok("分类：长说明句 → note", OV.classifyField("Please use same execution for hair & face embroidery") === "note");
+    ok("分类：中文短标签 → label", OV.classifyField("材质规格") === "label");
+  }
+
+  // ---------- 去重：同一处只留一条 ----------
+  {
+    // 几乎同一个位置、文本略有差别（模拟"裙子被翻译两次"）
+    const dup = U.dedupeOverlappingItems([
+      { x: 10, y: 10, w: 100, h: 20, src: "Skirt", dst: "裙子" },
+      { x: 12, y: 11, w: 98, h: 19, src: "Skirf", dst: "裙子" },
+    ]);
+    ok("去重：同一处的两次识别被合并成 1 条", dup.items.length === 1, "剩 " + dup.items.length);
+    ok("去重：计入了合并数", dup.merged === 1, "merged=" + dup.merged);
+
+    // 上下相邻的两行文字不能被误合并
+    const stack = U.dedupeOverlappingItems([
+      { x: 10, y: 10, w: 100, h: 20, src: "Front", dst: "正面" },
+      { x: 10, y: 32, w: 100, h: 20, src: "Back", dst: "背面" },
+    ]);
+    ok("去重：上下相邻的两行不会被误合并", stack.items.length === 2, "剩 " + stack.items.length);
+
+    // 同一行的两个不同标签不能被误合并
+    const sameRow = U.dedupeOverlappingItems([
+      { x: 10, y: 10, w: 60, h: 20, src: "Colors", dst: "配色" },
+      { x: 300, y: 10, w: 60, h: 20, src: "Sizes", dst: "尺寸" },
+    ]);
+    ok("去重：同一行的远处标签不会被误合并", sameRow.items.length === 2, "剩 " + sameRow.items.length);
+
+    // 保留带译文的那条
+    const prefer = U.dedupeOverlappingItems([
+      { x: 10, y: 10, w: 100, h: 20, src: "Skirt", dst: "" },
+      { x: 12, y: 11, w: 98, h: 19, src: "Skirt", dst: "裙子" },
+    ]);
+    ok("去重：保留带译文的那条", prefer.items.length === 1 && prefer.items[0].dst === "裙子", JSON.stringify(prefer.items[0]));
+  }
+}
+
+/* ============================================================
  * 汇总
  * ============================================================ */
 

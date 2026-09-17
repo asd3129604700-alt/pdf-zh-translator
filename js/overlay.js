@@ -44,8 +44,11 @@
   /**
    * 换行。英文按空格断，中文没空格所以按字断。
    * 顺带处理两个中文排版禁忌：行首不能是收尾标点，行尾不能是起始标点。
+   *
+   * spacing 是字距（em）。放在 opts 之前，是因为它是排版参数而不是选项，
+   * 而且旧调用点传 4 个参数时不至于把 opts 挤错位。
    */
-  function wrapText(measure, text, maxWidth, fontSize, opts) {
+  function wrapText(measure, text, maxWidth, fontSize, spacing, opts) {
     const src = String(text == null ? "" : text);
     if (!src) return [];
     if (!(maxWidth > 0)) return [src];
@@ -55,7 +58,7 @@
     let cur = "";
 
     function width(s) {
-      return measure(s, fontSize);
+      return measure(s, fontSize, spacing);
     }
 
     for (let i = 0; i < chars.length; i++) {
@@ -88,14 +91,22 @@
   /**
    * 在给定框内排版中文。
    *
-   * measure(str, fontSize) -> 像素宽度（注入的函数，便于测试）
+   * measure(str, fontSize, spacingEm) -> 像素宽度（注入的函数，便于测试）
+   *   spacingEm 是字距，单位是 em（负值表示收紧）。第三个参数可以省略。
    * box: {x, y, w, h}
    * opts: {
-   *   minFontSize, maxFontSize, allowH,   // allowH = 这个框实际可用的高度（含上下空闲）
-   *   lineHeightRatio, fontFillRatio
+   *   minFontSize, maxFontSize, allowH,        // allowH = 实际可用高度（含上下空闲）
+   *   lineHeightRatio, fontFillRatio, letterSpacings
    * }
    *
-   * 返回 { lines, fontSize, lineHeight, blockH, x, y, overflow, shrunk }
+   * 返回 { lines, fontSize, lineHeight, blockH, widest, spacing, x, y, overflow, shrunk }
+   *
+   * 关于两个默认值，参考的是 ShinobuTranslator 的排版常数：
+   *  · 行高 1.16 → 1.02。中文行高比西文紧，1.16 排出来松垮、且多行块占高、
+   *    反而逼着字号往小缩。它的 horizontalLineHeightRatio 是 0.93（更紧）。
+   *  · 加了字距微调：宽度差一点点时，优先**收紧字距**而不是缩小字号 ——
+   *    字号是视觉大小的主体，能不动就不动。它有
+   *    minHorizontalLetterSpacingScale / maxHorizontalLetterSpacingScale 专门管这个。
    */
   function layoutText(measure, text, box, opts) {
     opts = opts || {};
@@ -103,8 +114,9 @@
     const h = Math.max(1, box.h);
     const minFont = Math.max(4, opts.minFontSize || 6);
     const allowH = Math.max(h, opts.allowH || h);
-    const lineHeightRatio = opts.lineHeightRatio || 1.16;
+    const lineHeightRatio = opts.lineHeightRatio || 1.02;
     const fillRatio = opts.fontFillRatio || 0.92;
+    const spacings = opts.letterSpacings || [0, -0.012, -0.025, -0.04];
 
     // 起始字号按原文行高来（原文行高就是最可靠的"这里的字本来多大"信号）
     let start = Math.floor(h * fillRatio);
@@ -124,18 +136,30 @@
     }
 
     let chosen = null;
-    for (let i = 0; i < ladder.length; i++) {
+    for (let i = 0; i < ladder.length && !chosen; i++) {
       const fs = ladder[i];
-      const lines = wrapText(measure, text, w, fs, opts);
       const lineHeight = fs * lineHeightRatio;
-      const blockH = lines.length * lineHeight;
-      let widest = 0;
-      for (let k = 0; k < lines.length; k++) {
-        widest = Math.max(widest, measure(lines[k], fs));
-      }
-      if (blockH <= allowH && widest <= w + 0.5) {
-        chosen = { lines: lines, fontSize: fs, lineHeight: lineHeight, blockH: blockH };
-        break;
+      // 同一个字号下先试正常字距，再逐步收紧 —— 收紧能过就不必缩字号
+      for (let s = 0; s < spacings.length; s++) {
+        const sp = spacings[s];
+        const lines = wrapText(measure, text, w, fs, sp, opts);
+        const blockH = lines.length * lineHeight;
+        if (blockH > allowH) continue;
+        let widest = 0;
+        for (let k = 0; k < lines.length; k++) {
+          widest = Math.max(widest, measure(lines[k], fs, sp));
+        }
+        if (widest <= w + 0.5) {
+          chosen = {
+            lines: lines,
+            fontSize: fs,
+            lineHeight: lineHeight,
+            blockH: blockH,
+            widest: widest,
+            spacing: sp,
+          };
+          break;
+        }
       }
     }
 
@@ -143,13 +167,20 @@
     if (!chosen) {
       // 连最小字号都放不下：用最小字号硬排，交给调用方去 clip，并标记溢出
       const fs = minFont;
-      const lines = wrapText(measure, text, w, fs, opts);
+      const sp = spacings[spacings.length - 1];
+      const lines = wrapText(measure, text, w, fs, sp, opts);
       const lineHeight = fs * lineHeightRatio;
+      let widest = 0;
+      for (let k = 0; k < lines.length; k++) {
+        widest = Math.max(widest, measure(lines[k], fs, sp));
+      }
       chosen = {
         lines: lines,
         fontSize: fs,
         lineHeight: lineHeight,
         blockH: lines.length * lineHeight,
+        widest: widest,
+        spacing: sp,
       };
       overflow = true;
     }
@@ -174,10 +205,14 @@
       fontSize: chosen.fontSize,
       lineHeight: chosen.lineHeight,
       blockH: textH,
+      widest: chosen.widest,
+      spacing: chosen.spacing,
       x: box.x,
       y: y,
       overflow: overflow,
       shrunk: chosen.fontSize < start,
+      // 字距被收紧过（说明是用调字距换来的字号，值得记一笔）
+      tightened: chosen.spacing < 0,
     };
   }
 
@@ -306,6 +341,58 @@
   }
 
   /* ============================================================
+   * 字段配色（可选功能，默认关闭）
+   *
+   * 按字段类型给中文上不同颜色，便于在密密麻麻的规格表上扫读。
+   * 分类是启发式的（看原文的形态），不需要任何语义模型：
+   *   · code  型号 / 色号 / 纯数值
+   *   · label 短标签 / 表头
+   *   · note  说明句
+   *
+   * 为什么默认关闭：这会改变原文档的观感，交给客户前可能不合适。
+   * 而且**深色底上不上色** —— 固定色在深底上的对比度没保障，
+   * 宁可保持从原图采样出来的字色（那是保证可读的）。
+   * ============================================================ */
+
+  const FIELD_COLORS = {
+    label: [26, 79, 138], // 深蓝：标签 / 表头
+    code: [138, 26, 92], // 品红：型号 / 色号 / 数值
+    note: [31, 111, 58], // 深绿：说明句
+  };
+
+  function classifyField(text) {
+    const s = String(text == null ? "" : text).trim();
+    if (!s) return "normal";
+    // 型号 / 色号
+    if (/^(PMS|SKU|ITEM|ART|MODEL)\b/i.test(s)) return "code";
+    // 纯数值 / 尺寸 / 百分比
+    if (/^[\d\s.,%'"\/x×\-+]+$/i.test(s)) return "code";
+    // 数字 + 单位（规格表上到处都是，例如 "45 in"、"160cm"、"65 %"）
+    if (/^[\d.,]+\s*(in|inch|cm|mm|m|ft|kg|g|oz|lb|pcs?|%)$/i.test(s)) return "code";
+    const latin = (s.match(/[A-Za-z]/g) || []).length;
+    const han = (s.match(/[\u4e00-\u9fff]/g) || []).length;
+    const len = latin + han;
+    // 长句 → 说明
+    if (len >= 22 || /[.。;；]/.test(s)) return "note";
+    // 全大写的短标签 / 表头
+    if (/^[A-Z0-9\s\/&.\-]{2,}$/.test(s)) return "label";
+    if (len <= 14) return "label";
+    return "normal";
+  }
+
+  /**
+   * 决定这一条用什么颜色。
+   * bg 是 {@link sampleBackground} 的结果：里面有采样出来的 textColor 和 bgIsDark。
+   */
+  function colorForItem(it, bg, opts) {
+    const fallback = bg.textColor;
+    if (!opts || !opts.fieldColors) return fallback;
+    if (bg.bgIsDark) return fallback; // 深底上保持采样色，保证对比度
+    const kind = classifyField(it.src || it.dst);
+    return FIELD_COLORS[kind] || fallback;
+  }
+
+  /* ============================================================
    * 实测框内的文字几何
    *
    * 为什么不能直接信传进来的框（下面这些数字是在真实客户图纸上量出来的）：
@@ -371,11 +458,18 @@
     let iy1 = -1;
     let inkCount = 0;
     const rowCount = new Int32Array(h);
+    // 每行的左右边界，用来判断原文的对齐方式（多行时看哪种对齐的边缘最齐）
+    const rowMinX = new Int32Array(h);
+    const rowMaxX = new Int32Array(h);
     for (let y = 0; y < h; y++) {
       let c = 0;
+      let mn = -1;
+      let mx = -1;
       for (let x = 0; x < w; x++) {
         if (Math.abs(lum[y * w + x] - bgLum) > contrast) {
           c++;
+          if (mn < 0) mn = x;
+          mx = x;
           if (x < ix0) ix0 = x;
           if (x > ix1) ix1 = x;
           if (y < iy0) iy0 = y;
@@ -383,19 +477,32 @@
         }
       }
       rowCount[y] = c;
+      rowMinX[y] = mn < 0 ? 0 : mn;
+      rowMaxX[y] = mx < 0 ? 0 : mx;
       inkCount += c;
     }
     if (ix1 < 0) return null;
 
-    // 数行：在墨迹的纵向范围内找"连续的墨行带"
+    // 数行：在墨迹的纵向范围内找"连续的墨行带"，同时记录每行的左右边界
     const bands = [];
     let start = -1;
+    let bMinX = 0;
+    let bMaxX = 0;
     for (let y = iy0; y <= iy1 + 1; y++) {
       const on = y <= iy1 && rowCount[y] > 0;
-      if (on && start < 0) {
-        start = y;
-      } else if (!on && start >= 0) {
-        if (y - start >= 2) bands.push(y - start);
+      if (on) {
+        if (start < 0) {
+          start = y;
+          bMinX = rowMinX[y];
+          bMaxX = rowMaxX[y];
+        } else {
+          if (rowMinX[y] < bMinX) bMinX = rowMinX[y];
+          if (rowMaxX[y] > bMaxX) bMaxX = rowMaxX[y];
+        }
+      } else if (start >= 0) {
+        if (y - start >= 2) {
+          bands.push({ h: y - start, x0: bMinX, x1: bMaxX });
+        }
         start = -1;
       }
     }
@@ -407,9 +514,13 @@
     if (bands.length > 1) {
       // 用各行带高度的中位数当"单行高"：比 inkH/行数 稳，
       // 不会被某一行带降部、或一行里的零星杂点带偏
-      const hs = bands.slice().sort(function (a, b) {
-        return a - b;
-      });
+      const hs = bands
+        .map(function (b) {
+          return b.h;
+        })
+        .sort(function (a, b) {
+          return a - b;
+        });
       lineHeight = hs[hs.length >> 1];
       lineCount = bands.length;
     }
@@ -426,12 +537,67 @@
       lineHeight: lineHeight,
       padLeft: ix0,
       padTop: iy0,
+      alignment: inferAlignment(bands, inkW, w, ix0, ix1),
       inkDensity: inkCount / Math.max(1, inkW * inkH),
       bgLum: bgLum,
       bgIsDark: bgLum < 95,
       boxW: w,
       boxH: h,
     };
+  }
+
+  /**
+   * 推断原文的水平对齐方式。
+   *
+   * 多行时看哪种对齐的"边缘离散度"最小 —— 左对齐的行左边缘齐、居中行的
+   * 中心齐、右对齐的行右边缘齐。思路参考 ShinobuTranslator 的
+   * inferHorizontalAlignment（它对 left/center/right 各算一次 spread 取最小）。
+   *
+   * 单行时没有行间信息，只能看它在框里的留白：左右留白都明显且接近 → 居中；
+   * 左边留白明显更多 → 右对齐；否则左对齐。
+   *
+   * 为什么值得做：中文通常比英文短，如果原文是居中的标题，
+   * 一律从左边开始画就会明显偏左 —— 这是"排版不好看"里很显眼的一种。
+   */
+  function inferAlignment(bands, inkW, boxW, ix0, ix1) {
+    if (bands.length >= 2) {
+      const lefts = bands.map(function (b) {
+        return b.x0;
+      });
+      const rights = bands.map(function (b) {
+        return b.x1;
+      });
+      const centers = bands.map(function (b) {
+        return (b.x0 + b.x1) / 2;
+      });
+      const spread = function (arr) {
+        let mn = Infinity;
+        let mx = -Infinity;
+        for (let i = 0; i < arr.length; i++) {
+          if (arr[i] < mn) mn = arr[i];
+          if (arr[i] > mx) mx = arr[i];
+        }
+        return mx - mn;
+      };
+      const sL = spread(lefts);
+      const sC = spread(centers);
+      const sR = spread(rights);
+      // 用"相对行宽的离散度"比较，避免长行天然绝对偏差更大
+      const tol = Math.max(3, inkW * 0.12);
+      if (sC <= tol && sC < sL && sC < sR) return "center";
+      if (sR <= tol && sR < sL) return "right";
+      return "left";
+    }
+
+    // 单行：看框内左右留白
+    const padL = ix0;
+    const padR = boxW - 1 - ix1;
+    const minPad = Math.max(4, boxW * 0.08);
+    if (padL >= minPad && padR >= minPad) {
+      if (Math.abs(padL - padR) <= Math.max(6, boxW * 0.12)) return "center";
+      if (padL > padR * 1.8) return "right";
+    }
+    return "left";
   }
 
   /* ============================================================
@@ -753,11 +919,28 @@
    * 主入口
    * ============================================================ */
 
+  /**
+   * 造一个 measure(str, fontPx, spacingEm)。
+   *
+   * 字距用 canvas 的 `letterSpacing`（Chrome/Edge 99+）。不支持时就退化成
+   * 按字符数手工估算 —— 中文每字一个 em，这个估算对 CJK 足够准，
+   * 总比完全不支持字距微调要好。
+   */
   function makeMeasurer(ctx, fontStack, weight) {
     const w = weight || 500;
-    return function (str, fontPx) {
+    const nativeSpacing = typeof ctx.letterSpacing === "string";
+    return function (str, fontPx, spacingEm) {
       ctx.font = w + " " + fontPx + "px " + fontStack;
-      return ctx.measureText(str).width;
+      const sp = spacingEm || 0;
+      if (nativeSpacing) {
+        ctx.letterSpacing = (sp * fontPx).toFixed(2) + "px";
+        const width = ctx.measureText(str).width;
+        ctx.letterSpacing = "0px";
+        return width;
+      }
+      const base = ctx.measureText(str).width;
+      const n = Array.from(String(str)).length;
+      return base + sp * fontPx * Math.max(0, n - 1);
     };
   }
 
@@ -919,13 +1102,32 @@
         ctx.beginPath();
         ctx.rect(cover.x, cover.y, cover.w, cover.h);
         ctx.clip();
-        ctx.fillStyle = rgbCss(bg.textColor);
+
+        // 按原文的对齐方式定位。中文一般比英文短，如果原文是居中的标题，
+        // 一律从左边起画就会明显偏左 —— 而"偏左"正是排版显得难看的一类。
+        let drawX = laid.x;
+        if (ink && laid.widest > 0) {
+          if (ink.alignment === "center") {
+            drawX = ink.x + (ink.w - laid.widest) / 2;
+          } else if (ink.alignment === "right") {
+            drawX = ink.x + ink.w - laid.widest;
+          }
+        }
+
+        ctx.fillStyle = rgbCss(colorForItem(it, bg, opts));
         ctx.textAlign = "left";
         ctx.textBaseline = "top";
         ctx.font = "500 " + laid.fontSize + "px " + fontStack;
-        for (let li = 0; li < laid.lines.length; li++) {
-          ctx.fillText(laid.lines[li], laid.x, laid.y + li * laid.lineHeight);
+        // 字距是在排版阶段就定好的（收紧字距常常能保住更大的字号），
+        // 绘制时必须用同一个值，否则量出来的宽度和画出来的对不上。
+        const nativeSpacing = typeof ctx.letterSpacing === "string";
+        if (nativeSpacing) {
+          ctx.letterSpacing = ((laid.spacing || 0) * laid.fontSize).toFixed(2) + "px";
         }
+        for (let li = 0; li < laid.lines.length; li++) {
+          ctx.fillText(laid.lines[li], drawX, laid.y + li * laid.lineHeight);
+        }
+        if (nativeSpacing) ctx.letterSpacing = "0px";
         ctx.restore();
 
         stats.drawn++;
@@ -956,6 +1158,9 @@
     isCJK: isCJK,
     // 去字干净程度相关的内部函数（单测要用）
     measureInk: measureInk,
+    classifyField: classifyField,
+    colorForItem: colorForItem,
+    inferAlignment: inferAlignment,
     growCoverUntilClean: growCoverUntilClean,
     sideDeviations: sideDeviations,
     stripDeviation: stripDeviation,
