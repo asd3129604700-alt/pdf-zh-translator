@@ -769,6 +769,7 @@
         cover: ctx.cover,
         maxGrowY: C.LIMITS.overlayMaxGrowY,
         minFontSize: C.LIMITS.overlayMinFontSize,
+      minReadableSize: C.LIMITS.overlayMinReadableSize,
         signal: ctx.signal,
         onLog: ctx.log,
       });
@@ -1072,6 +1073,7 @@
       cover: ctx.cover,
       maxGrowY: C.LIMITS.overlayMaxGrowY,
       minFontSize: C.LIMITS.overlayMinFontSize,
+      minReadableSize: C.LIMITS.overlayMinReadableSize,
       fieldColors: ctx.fieldColors,
       signal: ctx.signal,
       onLog: ctx.log,

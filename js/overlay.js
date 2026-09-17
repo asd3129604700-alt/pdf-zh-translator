@@ -310,8 +310,7 @@
       // 为什么不按行高推算一个"合理余量"：上游的框能偏多少没有可靠先验
       // （视觉模型给的是归一化估计值，OCR 的 bbox 不含抗锯齿边和降部），
       // 拍一个 0.7 或 1.5 倍行高都是在凭经验凑常数。真正的硬约束只有一个 ——
-      // 不能扩到别的文字上。所以这里只用邻居位置约束，其余交给
-      // "环不脏就不扩"以及 growCoverUntilClean 里的单侧上限去兜。
+      // 不能扩到别的文字上。所以这里只用邻居位置约束。
       let left = 0;
       let right = canvasW;
 
@@ -664,144 +663,6 @@
     return "left";
   }
 
-  /* ============================================================
-   * 扩张覆盖范围直到"边缘干净"
-   *
-   * 这是"去字不干净、留下灰色残影"的主因。
-   * 传进来的框不一定准：
-   *   · 视觉模型给的是 0-1000 归一化后的**估计值**，经常比真实文字小一圈；
-   *   · 本地 OCR 的 bbox 通常不含抗锯齿边缘、不含降部（g/y/p 的下半截）；
-   *   · 粗体、斜体、带描边的字都会超出 bbox。
-   * 框小了，原文就会在中文旁边留下一圈灰边。
-   *
-   * 做法很直接：往外扩一点，看看紧贴边缘的那一圈像素是不是还"脏"
-   * （与该圈自身的中位色偏差过大 → 说明还有墨）。脏就继续扩，
-   * 直到干净、或撞到邻居/上限为止。
-   * 这样即使上游给的框偏小，也能自己找回来。
-   * ============================================================ */
-
-  /** 紧贴矩形外侧的环厚度（像素） */
-  const RING_THICKNESS = 2;
-
-  /** 读一条条带，返回"与自身中位色的平均偏差"。越界返回 -1 */
-  function stripDeviation(ctx, x, y, w, h) {
-    if (w <= 0 || h <= 0) return -1;
-    let img;
-    try {
-      img = ctx.getImageData(x, y, w, h);
-    } catch (e) {
-      return -1;
-    }
-    const d = img.data;
-    const n = w * h;
-    if (!n) return -1;
-    const cols = new Array(n);
-    for (let i = 0; i < n; i++) {
-      const o = i * 4;
-      cols[i] = [d[o], d[o + 1], d[o + 2]];
-    }
-    const m = medianColor(cols);
-    let sum = 0;
-    for (let i = 0; i < n; i++) {
-      sum +=
-        Math.abs(cols[i][0] - m[0]) +
-        Math.abs(cols[i][1] - m[1]) +
-        Math.abs(cols[i][2] - m[2]);
-    }
-    return sum / (n * 3);
-  }
-
-  /** 四条边外侧环的偏差。越界那一侧返回 -1（没东西可查，视为干净） */
-  function sideDeviations(ctx, rect, W, H) {
-    const t = RING_THICKNESS;
-    const x0 = U.clamp(Math.round(rect.x), 0, W);
-    const y0 = U.clamp(Math.round(rect.y), 0, H);
-    const x1 = U.clamp(Math.round(rect.x + rect.w), 0, W);
-    const y1 = U.clamp(Math.round(rect.y + rect.h), 0, H);
-    return {
-      top: y0 - t >= 0 ? stripDeviation(ctx, x0, y0 - t, x1 - x0, t) : -1,
-      bottom: y1 + t <= H ? stripDeviation(ctx, x0, y1, x1 - x0, t) : -1,
-      left: x0 - t >= 0 ? stripDeviation(ctx, x0 - t, y0, t, y1 - y0) : -1,
-      right: x1 + t <= W ? stripDeviation(ctx, x1, y0, t, y1 - y0) : -1,
-    };
-  }
-
-  /**
-   * 从 base 出发逐侧外扩，直到边缘干净或触到 bounds。
-   * 只扩"脏"的那一侧：干净的方向不乱扩，免得平白吃掉旁边的背景内容。
-   *
-   * bounds 是这里唯一的刹车，这是有意的：在扩到"外沿完全干净"的位置之前，
-   * 外沿会一直是脏的（穿过字形时环里始终有墨），所以任何"没见好转就收手"
-   * 式的启发都会在见效前放弃 —— 试过，结果是把该修的残影留下了。
-   * 真正防跑偏的是 bounds：它来自邻居位置，扩不过去。
-   */
-  function growCoverUntilClean(ctx, base, bounds, opts) {
-    opts = opts || {};
-    const W = opts.canvasW;
-    const H = opts.canvasH;
-    // 20 是个经验值：纯色/轻微噪声底通常只有 2~8，抗锯齿残影一般 30 以上
-    const threshold = opts.ringThreshold == null ? 20 : opts.ringThreshold;
-    // 步长取小一点：步长太粗会在触到边界前就停住，补不满该补的距离
-    const step = Math.max(1, Math.round(base.h * (opts.growStepRatio || 0.15)));
-    const maxRounds = opts.maxGrowRounds == null ? 12 : opts.maxGrowRounds;
-    const maxPerSide = Math.max(6, Math.round(base.h * (opts.maxGrowPerSideRatio || 2.0)));
-
-    let x = base.x;
-    let y = base.y;
-    let w = base.w;
-    let h = base.h;
-    const startX = x;
-    const startY = y;
-
-    for (let round = 0; round < maxRounds; round++) {
-      const dev = sideDeviations(ctx, { x: x, y: y, w: w, h: h }, W, H);
-      let grew = false;
-
-      if (
-        dev.top >= 0 &&
-        dev.top > threshold &&
-        y - step >= bounds.top &&
-        startY - y < maxPerSide
-      ) {
-        y -= step;
-        h += step;
-        grew = true;
-      }
-      if (
-        dev.bottom >= 0 &&
-        dev.bottom > threshold &&
-        y + h + step <= bounds.bottom &&
-        y + h - (startY + base.h) < maxPerSide
-      ) {
-        h += step;
-        grew = true;
-      }
-      if (
-        dev.left >= 0 &&
-        dev.left > threshold &&
-        x - step >= bounds.left &&
-        startX - x < maxPerSide
-      ) {
-        x -= step;
-        w += step;
-        grew = true;
-      }
-      if (
-        dev.right >= 0 &&
-        dev.right > threshold &&
-        x + w + step <= bounds.right &&
-        x + w - (startX + base.w) < maxPerSide
-      ) {
-        w += step;
-        grew = true;
-      }
-
-      if (!grew) break;
-    }
-
-    return { x: x, y: y, w: w, h: h };
-  }
-
   /**
    * 采样：底色 ring（用于重建背景）+ 字色（用于写中文）。
    *
@@ -1031,6 +892,9 @@
       shrunk: 0,
       overflow: 0,
       grown: 0,
+      inpainted: 0,
+      inpaintPixels: 0,
+      inpaintFallback: 0,
       failed: 0,
       ms: 0,
     };
@@ -1098,14 +962,21 @@
           ? { x: ink.x, y: ink.y, w: ink.w, h: ink.h }
           : { x: it.x, y: it.y, w: it.w, h: it.h };
 
+        // 字号上限：
+        //  · 正常情况下**不超过原文的单行高** —— 这是之前修"字体太大"定下的规矩；
+        //  · 但原文本身很小的时候（8~9px 的标注），照搬就成了看不清的小字，
+        //    用户反馈"有的字还是太小了"。所以给一个可读下限：允许放到
+        //    max(原文单行高, 可读下限)。中文普通比英文短，框内往往有余量，
+        //    排版函数会在宽高约束内尽量取大，取不到也不会硬撑。
+        const readableFloor = opts.minReadableSize == null ? 11 : opts.minReadableSize;
+        let sizeCap = opts.maxFontSize || Infinity;
+        if (ink && ink.lineHeight > 0) {
+          sizeCap = Math.min(sizeCap, Math.max(ink.lineHeight, readableFloor));
+        }
+
         const laid = layoutText(measure, String(it.dst), textBox, {
           minFontSize: minFontSize,
-          // 字号上限用**实测的单行高**，而不是整块高：
-          // 一块 450px 高的框里如果是 5 行 30px 的小字，字号就该按 30px 走
-          maxFontSize:
-            ink && ink.lineHeight > 0
-              ? Math.min(opts.maxFontSize || Infinity, ink.lineHeight)
-              : opts.maxFontSize,
+          maxFontSize: sizeCap,
           allowTop: lim.top,
           allowBottom: lim.bottom,
           allowH: lim.allowH,
@@ -1128,58 +999,66 @@
           }
         }
 
-        // 覆盖范围 = 原框 ∪ 实际文字块 ∪ **真正画出来的中文范围**，再加一圈余量。
+        // 去字范围 = 原框 ∪ 实际文字块 ∪ **真正画出来的中文范围**，再加一圈余量。
         //
         // 最后一项是"允许轻微溢出"能成立的前提：中文可能比原框宽一点，
-        // 覆盖范围不跟着走的话，多出来的部分会被 clip 掉。
+        // 去字范围不跟着走的话，多出来的部分会被 clip 掉。
         //
         // 垂直方向的余量不能省：原文的 bbox 通常不含抗锯齿边缘和降部
         // （g/y/p 的下半截会伸出去），不留余量就会在中文下面留一道灰边。
-        const padX = Math.max(2, Math.round(it.h * 0.16));
-        const padY = Math.max(2, Math.round(it.h * 0.18));
+        //
+        // 余量比"刚好贴合"大一些（行高的 1/4），因为上游的框可能偏小；
+        // 但**必须是固定上限、不能再迭代扩张** —— 见下面那段注释。
+        const padX = Math.max(3, Math.round(it.h * 0.25));
+        const padY = Math.max(3, Math.round(it.h * 0.3));
         const textL = drawX;
         const textR = drawX + Math.max(0, laid.widest);
 
-        // 夹在邻居允许的范围内：宁可少盖一点，也绝不能压到旁边的文字。
-        // 余量加上去之后有可能越过边界（密集排版上尤其常见），所以必须夹。
+        // 夹在邻居允许的范围内：宁可少擦一点，也绝不能压到旁边的文字。
         let bx = Math.max(Math.min(it.x - padX, textL - padX), lim.left);
         let by = Math.max(Math.min(it.y, laid.y) - padY, lim.top);
         let bx1 = Math.min(Math.max(it.x + it.w + padX, textR + padX), lim.right);
         let by1 = Math.min(Math.max(it.y + it.h, laid.y + laid.blockH) + padY, lim.bottom);
         if (bx1 <= bx) bx1 = Math.min(bx + 1, lim.right);
         if (by1 <= by) by1 = Math.min(by + 1, lim.bottom);
+        const cover = { x: bx, y: by, w: bx1 - bx, h: by1 - by };
 
-        // 再自动扩张，把上游偏小的框找补回来（详见 growCoverUntilClean 的注释）
-        const cover = growCoverUntilClean(
-          srcCtx,
-          { x: bx, y: by, w: bx1 - bx, h: by1 - by },
-          { left: lim.left, right: lim.right, top: lim.top, bottom: lim.bottom },
-          {
-            canvasW: canvas.width,
-            canvasH: canvas.height,
-            ringThreshold: opts.ringThreshold,
-            maxGrowRounds: opts.maxGrowRounds,
-            growStepRatio: opts.growStepRatio,
-          }
-        );
-        if (cover.x !== bx || cover.y !== by || cover.w !== bx1 - bx || cover.h !== by1 - by) {
-          stats.grown++;
-        }
-
-        // 调试用：把「原框」和「实际覆盖范围」都抛出去。
-        // 验证"去字干不干净"时需要对比这两者的外沿 —— 覆盖范围的外沿应当已经干净。
+        // ⚠ 这里以前有一段 growCoverUntilClean：不断向外扩张直到"边缘干净"。
+        // 那是错的，而且是"涂抹做得太差"的主因：
+        // 文字旁边常常有表格线、边框、图案描边，它们永远不会让边缘变"干净"，
+        // 于是扩张一路顶到上限，**把一大块表格线或图案擦掉**。
+        // 更糟的是我当时用来衡量效果的指标是"边缘还有没有墨"，
+        // 而擦掉线条正好让这个数字变好看 —— 指标本身在奖励错误行为。
+        //
+        // 现在改为：擦除范围由**文字掩膜**决定（见 PZInpaint），
+        // 扩张只保留上面那个固定余量。
         if (opts.onCover) {
-          opts.onCover(
-            { x: cover.x, y: cover.y, w: cover.w, h: cover.h },
-            { x: it.x, y: it.y, w: it.w, h: it.h }
-          );
+          opts.onCover(cover, { x: it.x, y: it.y, w: it.w, h: it.h });
         }
 
-        // 底色采样读**原图**。这里读的是正在被涂改的 canvas 的话，
-        // 前面已经画上去的补丁会污染后面框的环采样，相邻文字互相影响，
-        // 表现就是"某几块补丁颜色和周围对不上"。
+        // 字色/底色深浅从**原图**采样（这张画布已经被涂改过，读它会串味）
         const bg = sampleBackground(srcCtx, cover, canvas.width, canvas.height);
-        paintBackground(ctx, cover, bg);
+
+        // 去字：只擦"文字像素"，表格线、图案、纹理都保留，再用无缝扩散补回去。
+        // 失败时（这块里根本没识别出文字像素）退回整体填充，至少保证原文被盖住。
+        let coverOk = false;
+        if (global.PZInpaint && opts.inpaint !== false) {
+          const inp = global.PZInpaint.coverText(srcCtx, ctx, cover, {
+            contrast: opts.inkContrast,
+            dilate: opts.inpaintDilate,
+            minMaskRatio: opts.inpaintMinMaskRatio,
+          });
+          coverOk = !!inp.ok;
+          if (coverOk) {
+            stats.inpainted++;
+            stats.inpaintPixels += inp.maskCount;
+          } else {
+            stats.inpaintFallback++;
+          }
+        }
+        if (!coverOk) {
+          paintBackground(ctx, cover, bg);
+        }
 
         ctx.save();
         // 裁剪到覆盖范围：宁可字被裁掉一点，也绝不压到相邻文字
@@ -1235,9 +1114,6 @@
     classifyField: classifyField,
     colorForItem: colorForItem,
     inferAlignment: inferAlignment,
-    growCoverUntilClean: growCoverUntilClean,
-    sideDeviations: sideDeviations,
-    stripDeviation: stripDeviation,
     DEFAULT_FONT_STACK: DEFAULT_FONT_STACK,
   };
 })(typeof window !== "undefined" ? window : globalThis);

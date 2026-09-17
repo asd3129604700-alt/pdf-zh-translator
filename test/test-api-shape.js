@@ -29,7 +29,7 @@ function load(rel) {
 }
 
 // 顺序与 index.html 一致
-["js/util.js", "js/config.js", "js/imageproc.js", "js/detect.js", "js/overlay.js",
+["js/util.js", "js/config.js", "js/imageproc.js", "js/detect.js", "js/inpaint.js", "js/overlay.js",
  "js/ocr-local.js", "js/vision.js", "js/translate.js", "js/pdf-engine.js"].forEach(load);
 
 let pass = 0;
@@ -66,7 +66,8 @@ console.log("\n[1] app.js 依赖的跨模块接口");
 const REQUIRED = {
   PZUtil: ["createCanvas", "ctx2d", "clamp", "isAbortError", "abortError", "throwIfAborted", "pool", "cropCanvas", "cloneCanvas", "fmtDuration", "toRect"],
   PZConfig: ["VERSION", "LIMITS", "VISION_PRESETS", "LLM_PRESETS", "PROFILES", "parseGlossary", "TARGET_LANGS"],
-  PZOverlay: ["render"],
+  PZOverlay: ["render", "measureInk", "layoutText", "computeNeighborLimits", "classifyField", "colorForItem"],
+  PZInpaint: ["buildMask", "inpaint", "coverText"],
   PZDetect: ["detect"],
   PZOcr: ["recognize", "terminate"],
   PZVision: ["translate", "testKey", "listModels"],

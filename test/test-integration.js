@@ -37,6 +37,7 @@ load("js/util.js");
 load("js/config.js");
 load("js/imageproc.js");
 load("js/detect.js");
+load("js/inpaint.js");
 load("js/overlay.js");
 load("js/ocr-local.js");
 load("js/vision.js");
@@ -904,187 +905,304 @@ console.log("\n[7] 端到端：检测几何 → 排版（不用手搓框）");
 }
 
 /* ============================================================
- * 8. 去字：覆盖范围自动扩张（清理上游偏小的框）
+ * 8. 去字：文字掩膜 + 无缝修复（像素级验证）
+ *
+ * 这一节用一个"内存里的软件 canvas"（真的读写像素）跑完整覆盖管线，
+ * 断言的是**像素结果**，不是调用次数：
+ *   · 原文被擦干净
+ *   · 旁边的表格线被保留（这是之前"涂抹太差"的根因）
+ *   · 填充是无缝的（不留矩形边界）
  * ============================================================ */
 
-console.log("\n[8] 去字：覆盖范围自动扩张");
+console.log("\n[8] 去字：文字掩膜 + 无缝修复");
 
 {
-  const OV = globalThis.PZOverlay;
+  const U = globalThis.PZUtil;
+  const INK = globalThis.PZInpaint;
 
   /**
-   * 假 ctx：inkRects 里的像素返回黑色，其余白色。
-   * 用来模拟"原文位置"和"框在哪儿"不一致的情况。
+   * 软件 canvas：真的持有一块 RGBA 缓冲，实现 render 需要的那部分 2D API。
+   * 只有这样才谈得上"用像素结果断言"。
    */
-  function makeInkCtx(W, H, inkRects) {
-    function isInk(x, y) {
-      for (let i = 0; i < inkRects.length; i++) {
-        const r = inkRects[i];
-        if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return true;
-      }
-      return false;
+  function makeSoftCanvas(W, H) {
+    const buf = new Uint8ClampedArray(W * H * 4);
+    for (let i = 0; i < buf.length; i += 4) { buf[i] = 255; buf[i + 1] = 255; buf[i + 2] = 255; buf[i + 3] = 255; } // 白底、不透明
+
+    function px(x, y) {
+      return (y * W + x) * 4;
     }
-    return {
+
+    const ctx = {
+      canvas: { width: W, height: H },
+      font: "",
+      fillStyle: "#000000",
+      textAlign: "left",
+      textBaseline: "top",
+      letterSpacing: "",
+      imageSmoothingEnabled: true,
+      imageSmoothingQuality: "",
+      _clip: null,
+
       getImageData: function (x, y, w, h) {
-        const data = new Uint8ClampedArray(Math.max(0, w * h * 4));
+        const out = new Uint8ClampedArray(Math.max(0, w * h * 4));
         for (let yy = 0; yy < h; yy++) {
           for (let xx = 0; xx < w; xx++) {
+            const sx = x + xx;
+            const sy = y + yy;
             const o = (yy * w + xx) * 4;
-            const v = isInk(x + xx, y + yy) ? 0 : 255;
-            data[o] = v;
-            data[o + 1] = v;
-            data[o + 2] = v;
-            data[o + 3] = 255;
+            if (sx < 0 || sy < 0 || sx >= W || sy >= H) {
+              out[o] = out[o + 1] = out[o + 2] = 255;
+              out[o + 3] = 255;
+              continue;
+            }
+            const p = px(sx, sy);
+            out[o] = buf[p];
+            out[o + 1] = buf[p + 1];
+            out[o + 2] = buf[p + 2];
+            out[o + 3] = 255;
           }
         }
-        return { width: w, height: h, data: data };
+        return { width: w, height: h, data: out };
       },
-    };
-  }
 
-  const W = 400;
-  const H = 200;
-
-  // 情形：文字框报的是 x∈[20,100)，但最后一个字的右半截其实伸到了 x=116。
-  // 现实里框偏小时就是这样 —— 边缘切过字形，紧贴外沿的一圈是"墨+背景"混杂。
-  // 伸出量取 16px（约 0.8 倍行高）：这是"bbox 少算了末尾一个字形"这一档的典型量级，
-  // 不是极端值（极端值会被邻居边界挡住，那种情况下保邻居比保残影重要）。
-  const stickingGlyph = [{ x: 100, y: 44, w: 16, h: 12 }];
-
-  // --- 边缘干净时不乱扩 ---
-  {
-    const ctx = makeInkCtx(W, H, []);
-    const base = { x: 40, y: 40, w: 60, h: 20 };
-    const out = OV.growCoverUntilClean(ctx, base, { left: 0, right: W, top: 0, bottom: H }, {
-      canvasW: W,
-      canvasH: H,
-    });
-    ok(
-      "边缘干净时不扩张（不多盖背景）",
-      out.x === base.x && out.y === base.y && out.w === base.w && out.h === base.h,
-      JSON.stringify(out)
-    );
-  }
-
-  // --- 判据本身：混杂的环 vs 干净的环 ---
-  {
-    const rect = { x: 20, y: 40, w: 80, h: 20 };
-    const clean = OV.sideDeviations(makeInkCtx(W, H, []), rect, W, H);
-    const dirty = OV.sideDeviations(makeInkCtx(W, H, stickingGlyph), rect, W, H);
-    ok("干净图上右侧环的偏差接近 0", clean.right >= 0 && clean.right < 5, "right=" + clean.right);
-    ok("框偏小（右沿切过字形）时右侧环偏差明显变大，判据有效", dirty.right > 20, "right=" + dirty.right);
-    ok("这一侧的判定不会误伤干净的上/下/左边", clean.top < 5 && clean.bottom < 5 && clean.left < 5);
-  }
-
-  // --- 自动扩张：必须把伸出去的字形包进来 ---
-  {
-    const ctx = makeInkCtx(W, H, stickingGlyph);
-    const base = { x: 20, y: 40, w: 80, h: 20 };
-    const out = OV.growCoverUntilClean(ctx, base, { left: 0, right: W, top: 0, bottom: H }, {
-      canvasW: W,
-      canvasH: H,
-      maxGrowRounds: 10,
-    });
-    ok(
-      "框偏小时自动向外扩张，把伸出的字形包进去（这就是修「去字留残影」）",
-      out.x + out.w >= 116,
-      "扩张后右边到 " + (out.x + out.w) + "，字形伸到 116"
-    );
-    ok("扩张后不越出画布", out.x >= 0 && out.x + out.w <= W && out.y >= 0 && out.y + out.h <= H);
-
-    const dev = OV.sideDeviations(ctx, out, W, H);
-    ok(
-      "扩张后四条边的环都干净了",
-      ["top", "bottom", "left", "right"].every(function (s) {
-        return dev[s] < 0 || dev[s] <= 20;
-      }),
-      JSON.stringify(dev)
-    );
-    ok("只向右扩张，没往干净的方向乱扩", out.y === base.y && out.h === base.h, JSON.stringify(out));
-  }
-
-  // --- 有邻居时不能越界：宁可留一点残影也不压到邻居 ---
-  {
-    const ctx = makeInkCtx(W, H, stickingGlyph);
-    const base = { x: 20, y: 40, w: 80, h: 20 };
-    const out = OV.growCoverUntilClean(ctx, base, { left: 0, right: 104, top: 0, bottom: H }, {
-      canvasW: W,
-      canvasH: H,
-      maxGrowRounds: 10,
-    });
-    ok(
-      "被边界卡住时不越界（不压到邻居）",
-      out.x + out.w <= 104,
-      "右边到 " + (out.x + out.w) + "，允许到 104"
-    );
-  }
-
-  // --- 端到端：render 里真的会调用扩张 ---
-  {
-    function fakeCtxFactory(inkRects) {
-      const src = makeInkCtx(W, H, inkRects);
-      return function (w, h) {
-        const cv = { width: w, height: h, _c: null };
-        cv.getContext = function () {
-          if (!cv._c) {
-            const draws = [];
-            cv._c = {
-              canvas: { width: w, height: h },
-              fills: draws,
-              font: "",
-              fillStyle: "",
-              textAlign: "",
-              textBaseline: "",
-              imageSmoothingEnabled: true,
-              imageSmoothingQuality: "",
-              measureText: function (s) {
-                const m = /(\d+(?:\.\d+)?)px/.exec(cv._c.font);
-                const fs = m ? parseFloat(m[1]) : 10;
-                return { width: String(s).length * fs };
-              },
-              getImageData: src.getImageData,
-              createImageData: function (ww, hh) {
-                return { width: ww, height: hh, data: new Uint8ClampedArray(Math.max(0, ww * hh * 4)) };
-              },
-              fillRect: function (x, y, ww, hh) {
-                draws.push({ x: x, y: y, w: ww, h: hh });
-              },
-              fillText: function () {},
-              save: function () {},
-              restore: function () {},
-              beginPath: function () {},
-              rect: function () {},
-              clip: function () {},
-              clearRect: function () {},
-              putImageData: function () {},
-              drawImage: function () {},
-            };
+      putImageData: function (img, x, y) {
+        for (let yy = 0; yy < img.height; yy++) {
+          for (let xx = 0; xx < img.width; xx++) {
+            const sx = x + xx;
+            const sy = y + yy;
+            if (sx < 0 || sy < 0 || sx >= W || sy >= H) continue;
+            const o = (yy * img.width + xx) * 4;
+            const p = px(sx, sy);
+            buf[p] = img.data[o];
+            buf[p + 1] = img.data[o + 1];
+            buf[p + 2] = img.data[o + 2];
           }
-          return cv._c;
-        };
-        return cv;
-      };
-    }
+        }
+      },
 
-    globalThis.PZUtil.setCanvasFactory(fakeCtxFactory(stickingGlyph));
-    const srcCanvas = globalThis.PZUtil.createCanvas(W, H);
-    const out = OV.render(
-      srcCanvas,
-      [{ x: 20, y: 40, w: 80, h: 20, src: "(原文框偏小)", dst: "中文" }],
-      { cover: true, maxGrowY: 1.6, minFontSize: 6 }
-    );
-    const fills = out.getContext().fills;
-    ok("render 走通了，产生了一次覆盖", fills.length === 1, "fills=" + fills.length);
-    if (fills.length) {
-      ok(
-        "render 的覆盖范围包含伸出去的字形（不是只盖原框）",
-        fills[0].x + fills[0].w >= 116,
-        "右边到 " + (fills[0].x + fills[0].w)
-      );
-      ok("统计里记了扩张次数", out._overlayStats.grown >= 1, JSON.stringify(out._overlayStats));
-    }
-    globalThis.PZUtil.setCanvasFactory(null);
+      createImageData: function (w, h) {
+        return { width: w, height: h, data: new Uint8ClampedArray(Math.max(0, w * h * 4)) };
+      },
+
+      fillRect: function (x, y, w, h) {
+        const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(ctx.fillStyle);
+        const c = m ? [+m[1], +m[2], +m[3]] : [0, 0, 0];
+        for (let yy = Math.round(y); yy < Math.round(y + h); yy++) {
+          for (let xx = Math.round(x); xx < Math.round(x + w); xx++) {
+            if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+            if (ctx._clip && (xx < ctx._clip.x || xx >= ctx._clip.x + ctx._clip.w ||
+                              yy < ctx._clip.y || yy >= ctx._clip.y + ctx._clip.h)) continue;
+            const p = px(xx, yy);
+            buf[p] = c[0];
+            buf[p + 1] = c[1];
+            buf[p + 2] = c[2];
+          }
+        }
+      },
+
+      // 文字不真的渲染：这一节测的是"去字"，不是"写字"
+      fillText: function () {},
+
+      measureText: function (s) {
+        const m = /(\d+(?:\.\d+)?)px/.exec(ctx.font);
+        const fs = m ? parseFloat(m[1]) : 10;
+        let w = 0;
+        for (const ch of String(s)) {
+          w += /[\u4e00-\u9fff\uff00-\uffef\u3000-\u303f]/.test(ch) ? fs : fs * 0.55;
+        }
+        return { width: w };
+      },
+
+      drawImage: function (src, sx, sy, sw, sh, dx, dy, dw, dh) {
+        // 只支持 cloneCanvas 用的那种整张拷贝
+        const s = src && src._buf ? src : null;
+        if (!s) return;
+        if (arguments.length <= 3) {
+          for (let y = 0; y < Math.min(H, s.height); y++) {
+            for (let x = 0; x < Math.min(W, s.width); x++) {
+              const a = (y * s.width + x) * 4;
+              const b = px(x, y);
+              buf[b] = s._buf[a];
+              buf[b + 1] = s._buf[a + 1];
+              buf[b + 2] = s._buf[a + 2];
+            }
+          }
+        }
+      },
+
+      save: function () {},
+      restore: function () { ctx._clip = null; },
+      beginPath: function () {},
+      rect: function (x, y, w, h) { ctx._clip = { x: x, y: y, w: w, h: h }; },
+      clip: function () {},
+      clearRect: function () {},
+    };
+
+    const canvas = {
+      width: W,
+      height: H,
+      _buf: buf,
+      getContext: function () { return ctx; },
+      toDataURL: function () { return "data:image/png;base64,"; },
+    };
+    return canvas;
   }
+
+  /** 往软件画布上画一个实心矩形（模拟"文字"或"表格线"） */
+  function paint(canvas, rect, rgb) {
+    const W = canvas.width;
+    const buf = canvas._buf;
+    for (let y = rect.y; y < rect.y + rect.h; y++) {
+      for (let x = rect.x; x < rect.x + rect.w; x++) {
+        if (x < 0 || y < 0 || x >= W || y >= canvas.height) continue;
+        const p = (y * W + x) * 4;
+        buf[p] = rgb[0];
+        buf[p + 1] = rgb[1];
+        buf[p + 2] = rgb[2];
+      }
+    }
+  }
+
+  function readPx(canvas, x, y) {
+    const p = (y * canvas.width + x) * 4;
+    return [canvas._buf[p], canvas._buf[p + 1], canvas._buf[p + 2]];
+  }
+
+  U.setCanvasFactory(makeSoftCanvas);
+
+  const W = 300;
+  const H = 120;
+
+  // ---------- 掩膜本身：什么该擦、什么不该擦 ----------
+  {
+    const cv = makeSoftCanvas(W, H);
+    // 白底 + 三段"文字"（小实心块）+ 一条贯穿的表格线 + 一个大色块
+    paint(cv, { x: 40, y: 30, w: 8, h: 10 }, [0, 0, 0]);
+    paint(cv, { x: 52, y: 30, w: 8, h: 10 }, [0, 0, 0]);
+    paint(cv, { x: 64, y: 30, w: 8, h: 10 }, [0, 0, 0]);
+    // 表格线放在 y=80，和色块之间留出空隙 —— 贴着的话 4 连通会把它们
+    // 连成一个组件，就测不出「线被正确丢弃」了
+    paint(cv, { x: 0, y: 80, w: W, h: 2 }, [0, 0, 0]);
+    paint(cv, { x: 200, y: 20, w: 60, h: 40 }, [0, 0, 0]); // 大色块（图案）
+
+    const ctx = cv.getContext("2d");
+    const img = ctx.getImageData(0, 0, W, H);
+    const built = INK.buildMask(img, { contrast: 38, dilate: 0 });
+
+    const isMasked = function (x, y) {
+      return built.mask[y * W + x] === 1;
+    };
+    ok("掩膜：三段文字都被标记", isMasked(44, 35) && isMasked(56, 35) && isMasked(68, 35));
+    ok("掩膜：表格线**没有**被标记（它是背景，不该擦）", !isMasked(150, 81) && !isMasked(20, 80));
+    ok("掩膜：大色块没有被标记（那是图案不是字）", !isMasked(230, 40));
+    ok("掩膜：线条与大色块都被判为「不该擦」（dropped >= 2）", built.dropped >= 2, "dropped=" + built.dropped + " kept=" + built.kept);
+  }
+
+  // ---------- 膨胀：吃掉抗锯齿边 ----------
+  {
+    const cv = makeSoftCanvas(W, H);
+    paint(cv, { x: 40, y: 30, w: 8, h: 10 }, [0, 0, 0]);
+    const ctx = cv.getContext("2d");
+    const img = ctx.getImageData(0, 0, W, H);
+    const m0 = INK.buildMask(img, { dilate: 0 });
+    const m2 = INK.buildMask(img, { dilate: 2 });
+    ok("膨胀：dilate=2 的掩膜比 dilate=0 大", m2.count > m0.count, m0.count + " → " + m2.count);
+    ok(
+      "膨胀：原文外沿 1px 处也被覆盖（抗锯齿边不会留下灰边）",
+      m2.mask[30 * W + 39] === 1 && m2.mask[30 * W + 49] === 1
+    );
+  }
+
+  // ---------- 修复：填出来的像素要与周围连续 ----------
+  {
+    const cv = makeSoftCanvas(W, H);
+    // 白底上一块灰度渐变，中间挖个洞（模拟文字），修复后洞里应当是平滑过渡
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const v = 60 + Math.round((x / W) * 120);
+        paint(cv, { x: x, y: y, w: 1, h: 1 }, [v, v, v]);
+      }
+    }
+    paint(cv, { x: 140, y: 50, w: 20, h: 16 }, [0, 0, 0]); // 文字
+    const ctx = cv.getContext("2d");
+    const img = ctx.getImageData(0, 0, W, H);
+    const built = INK.buildMask(img, { dilate: 2 });
+    INK.inpaint(img, built.mask, {});
+
+    // 洞中央应当接近周围渐变的值（x=150 处约为 60+60=120）
+    const center = (function () {
+      const p = (58 * W + 150) * 4;
+      return img.data[p];
+    })();
+    ok(
+      "修复：文字被擦掉，填出来的值与周围渐变一致（无缝）",
+      Math.abs(center - 120) <= 12,
+      "填出 " + center + "，周围渐变期望约 120"
+    );
+
+    // 边界连续性：左右两侧的差值应当很小
+    const left = img.data[(58 * W + 137) * 4];
+    const right = img.data[(58 * W + 163) * 4];
+    ok(
+      "修复：跨越原文字区域的相邻像素差值很小（不留矩形边界）",
+      Math.abs(right - left) < 40,
+      "左 " + left + " / 右 " + right
+    );
+  }
+
+  // ---------- 端到端：走真实的 PZOverlay.render ----------
+  {
+    const cv = makeSoftCanvas(W, H);
+    // 白底 + "文字" + 一条横穿文字下方、会经过去字范围的表格线
+    paint(cv, { x: 40, y: 28, w: 9, h: 12 }, [0, 0, 0]);
+    paint(cv, { x: 53, y: 28, w: 9, h: 12 }, [0, 0, 0]);
+    paint(cv, { x: 66, y: 28, w: 9, h: 12 }, [0, 0, 0]);
+    paint(cv, { x: 20, y: 22, w: 220, h: 2 }, [0, 0, 0]); // 表格线（上）
+    paint(cv, { x: 20, y: 46, w: 220, h: 2 }, [0, 0, 0]); // 表格线（下）
+
+    const item = { x: 38, y: 26, w: 40, h: 16, src: "LABEL", dst: "标签" };
+    const out = globalThis.PZOverlay.render(cv, [item], { cover: true, minFontSize: 6 });
+
+    // 文字应当被擦掉：原文字的像素位置变成接近白
+    const t1 = readPx(out, 44, 34);
+    const t2 = readPx(out, 57, 34);
+    const t3 = readPx(out, 70, 34);
+    const lum = function (c) {
+      return (c[0] + c[1] + c[2]) / 3;
+    };
+    ok(
+      "端到端：原文被擦掉（三个字形位置都接近白底）",
+      lum(t1) > 200 && lum(t2) > 200 && lum(t3) > 200,
+      "亮度 " + [lum(t1), lum(t2), lum(t3)].map(Math.round).join("/")
+    );
+
+    // 表格线必须还在 —— 这正是"涂抹太差"要修的东西
+    const lineTop = readPx(out, 150, 23);
+    const lineBot = readPx(out, 150, 47);
+    ok(
+      "端到端：去字范围附近的表格线**被保留**（不再被整块擦掉）",
+      lum(lineTop) < 60 && lum(lineBot) < 60,
+      "线亮度 " + Math.round(lum(lineTop)) + " / " + Math.round(lum(lineBot))
+    );
+
+    ok("端到端：统计里记了走的是修复路径", out._overlayStats.inpainted === 1, JSON.stringify(out._overlayStats));
+  }
+
+  // ---------- 掩膜为空时退回整体填充，保证原文一定被盖住 ----------
+  {
+    const cv = makeSoftCanvas(W, H);
+    paint(cv, { x: 100, y: 40, w: 40, h: 20 }, [0, 0, 0]);
+    // 传一个完全落在空白处的框：那里没有文字掩膜
+    const item = { x: 200, y: 80, w: 40, h: 20, src: "X", dst: "叉" };
+    const out = globalThis.PZOverlay.render(cv, [item], { cover: true, minFontSize: 6 });
+    ok(
+      "掩膜为空时退回整体填充（保证原文被盖住，不会留英文）",
+      out._overlayStats.inpaintFallback === 1,
+      JSON.stringify(out._overlayStats)
+    );
+  }
+
+  U.setCanvasFactory(null);
 }
 
 /* ============================================================
@@ -1253,10 +1371,17 @@ console.log("\n[9] 实测框内几何（字号 / 对齐的依据）");
         Math.abs(texts[0].x - 35) < 1.5,
         "实际 x=" + texts[0].x
       );
+      // 字号上限 = max(原文单行高, 可读下限)：原文只有 8px 时允许放到可读下限 11，
+      // 但仍然远小于"整块墨迹高 22" —— 之前"字号算得过大"的错误没有回来
       ok(
-        "render 字号按单行高（8）封顶，而不是按整块墨迹高（22）",
-        texts[0].fs <= 8.5,
+        "render 字号不超过 max(单行高 8, 可读下限 11)",
+        texts[0].fs <= 11.5 && texts[0].fs >= 8,
         "实际字号=" + texts[0].fs
+      );
+      ok(
+        "render 字号仍远小于整块墨迹高（22），没有重犯「字体太大」",
+        texts[0].fs < 22,
+        "实际字号=" + texts[0].fs + " vs 整块墨迹高 22"
       );
     }
     globalThis.PZUtil.setCanvasFactory(null);
@@ -1611,10 +1736,15 @@ console.log("\n[11] 端到端去重（模拟视觉模型两遍返回同一处）
   });
   ok("修复后同一处只画一次", afterTexts.length === 1, "画了 " + afterTexts.length + " 次");
   ok("不相干的那处照常画", otherTexts.length === 1, "画了 " + otherTexts.length + " 次");
+  // 去重后两条 item 各处理一次：有原文墨迹的那条走"掩膜 + 修复"（不刷整块补丁），
+  // 没有墨迹的那条走整体填充兜底。
+  // （原来这里数 fillRect 次数；现在有墨迹的走修复路径、不刷补丁了，所以看统计。）
+  const st = after._overlayStats;
+  ok("覆盖：两条 item 各处理一次，没有重复覆盖", st.drawn === 2, "drawn=" + st.drawn);
   ok(
-    "覆盖补丁也只有一处（不会出现后一块盖掉前一块中文的情况）",
-    after.getContext().fills.length === 2,
-    "fills=" + after.getContext().fills.length
+    "覆盖：有原文的那条走修复路径，不刷整块补丁",
+    st.inpainted === 1 && st.inpaintFallback === 1,
+    "inpainted=" + st.inpainted + " fallback=" + st.inpaintFallback
   );
 
   globalThis.PZUtil.setCanvasFactory(null);
