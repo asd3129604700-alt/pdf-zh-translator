@@ -267,6 +267,64 @@ console.log("\n[5] selftest.html 引用的接口");
 }
 
 /* ============================================================
+ * 6. 关键控件的静态检查
+ *
+ * 浏览器验证（test/browser-check.js）能查这些，但它需要 playwright + 能启动
+ * Chromium；在受限环境里跑不了。所以这里用解析 HTML 的方式做一道静态兜底：
+ * 默认值写错、选项少了，这种问题静态检查就能抓到。
+ * ============================================================ */
+
+console.log("\n[6] 关键控件的默认值与选项");
+
+{
+  function blockFor(id) {
+    const i = indexHtml.indexOf('id="' + id + '"');
+    if (i < 0) return "";
+    // 往前找到这个标签的开始，往后取到它的结束标签
+    const tagStart = indexHtml.lastIndexOf("<", i);
+    const close = indexHtml.indexOf("</select>", i);
+    const selfClose = indexHtml.indexOf(">", i);
+    if (indexHtml.slice(tagStart, selfClose + 1).indexOf("<select") >= 0 && close >= 0) {
+      return indexHtml.slice(tagStart, close + 9);
+    }
+    const inputEnd = indexHtml.indexOf(">", i);
+    return indexHtml.slice(tagStart, inputEnd + 1);
+  }
+
+  // 预览缩放：3 档，默认"适应窗口"
+  const zoom = blockFor("opt-preview-zoom");
+  ok("预览缩放下拉存在", zoom.indexOf("<select") >= 0);
+  ok(
+    "预览缩放有 3 档（适应窗口 / 100% / 200%）",
+    (zoom.match(/<option/g) || []).length === 3,
+    "实际 " + (zoom.match(/<option/g) || []).length + " 档"
+  );
+  ok("预览缩放默认选中「适应窗口」", /<option value="fit"[^>]*selected/.test(zoom), zoom.replace(/\s+/g, " ").slice(0, 160));
+
+  // 字段配色：默认必须关闭（它会改变原文档观感）
+  const fc = blockFor("opt-field-colors");
+  ok("字段配色开关存在", fc.indexOf("checkbox") >= 0, fc.replace(/\s+/g, " ").slice(0, 120));
+  ok("字段配色默认关闭", fc.indexOf("checked") < 0, fc.replace(/\s+/g, " ").slice(0, 120));
+
+  // 另外两个开关默认开着，别被误改
+  ok("「保留型号代码」默认开启", blockFor("opt-preserve-codes").indexOf("checked") >= 0);
+  ok("「覆盖原文」默认开启", blockFor("opt-cover").indexOf("checked") >= 0);
+
+  // app.js 必须把这些控件接上（引用了 id 但没绑事件就是摆设）
+  ["opt-preview-zoom", "opt-field-colors"].forEach(function (id) {
+    ok("app.js 引用了 #" + id, appJs.indexOf('"#' + id + '"') >= 0);
+  });
+  ok(
+    "预览缩放的 change 事件已绑定",
+    /previewZoom\.addEventListener\(\s*"change"/.test(appJs)
+  );
+  ok(
+    "字段配色的 change 事件已绑定",
+    /fieldColors\.addEventListener\(\s*"change"/.test(appJs)
+  );
+}
+
+/* ============================================================
  * 汇总
  * ============================================================ */
 

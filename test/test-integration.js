@@ -216,16 +216,23 @@ console.log("\n[3] 排版引擎（PZOverlay）");
   };
 
   // box 100×20，起始字号 floor(20*0.92)=18，8 个汉字
-  //   fs=18 → 8*18=144 > 100，换行后 2 行 → 块高 2*18*1.16≈41.8 > allowH 27
-  //   fs=12 → 8*12=96 ≤ 100，1 行 → 块高 13.9 ≤ 27 ✓
+  //   fs=18 → 8*18=144 > 100，换行后 2 行，块高超过 allowH 27
+  //   fs=14 → 2 行，块高 14*1.02*2 ≈ 28.6 也超过 27
+  //   fs=12 → 8*12=96 ≤ 100，1 行 → 块高 12.2 ≤ 27 ✓
   const laid = OV.layoutText(measure, "中文中文中文中文", { x: 0, y: 0, w: 100, h: 20 }, {
     minFontSize: 6,
     allowH: 27,
   });
-  ok("layoutText：字号会缩到能放下为止", laid.fontSize <= 13, "fontSize=" + laid.fontSize);
+  ok("layoutText：放不下时会缩字号", laid.fontSize < 18, "fontSize=" + laid.fontSize);
   ok("layoutText：缩小后不再溢出允许高度", laid.blockH <= 27, "blockH=" + laid.blockH);
   ok("layoutText：确实发生了缩小", laid.shrunk === true);
-  ok("layoutText：未标记溢出", laid.overflow === false);
+  ok("layoutText：未标记纵向硬溢出", laid.overflow === false);
+  // 横向要么真的放得下、要么是"轻微溢出"且幅度在允许范围内 —— 两者必居其一
+  ok(
+    "layoutText：横向宽度要么放得下，要么是受控的轻微溢出",
+    laid.overflowX ? laid.widest <= 100 * 1.12 + 0.5 : laid.widest <= 100.5,
+    "widest=" + laid.widest.toFixed(1) + " overflowX=" + laid.overflowX
+  );
 
   // 极端窄框 + 长译文：必须标记 overflow 而不是返回 NaN
   const tight = OV.layoutText(
@@ -1366,6 +1373,52 @@ console.log("\n[10] 排版质量与去重");
       allowH: 30,
     });
     ok("字距：能正常放下时不收紧", laid2.tightened === false, "spacing=" + laid2.spacing);
+  }
+
+  // ---------- 轻微溢出：宁可略超宽，也不把字号压小一圈 ----------
+  {
+    // 中文 1 em / 西文 0.55 em，字距按 spacing × fontSize × (字符数-1)
+    const m2 = function (s, fs, sp) {
+      let w = 0;
+      for (const ch of String(s)) {
+        w += /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(ch) ? fs : fs * 0.55;
+      }
+      if (sp) w += sp * fs * Math.max(0, Array.from(String(s)).length - 1);
+      return w;
+    };
+
+    // 9 个汉字 / 框宽 130：严格放不下，字号会被压到 14（理想是 18）。
+    // 允许轻微溢出后可以用 16（超宽 10.8%），一档字号的差别。
+    const laid = OV.layoutText(m2, "中文中文中文中文中", { x: 0, y: 0, w: 130, h: 20 }, {
+      minFontSize: 6,
+      allowH: 32,
+    });
+    ok("轻微溢出：保住了更大的字号（16，而不是 14）", laid.fontSize === 16, "fontSize=" + laid.fontSize);
+    ok("轻微溢出：被标记为 overflowX", laid.overflowX === true);
+    ok(
+      "轻微溢出：超宽幅度不超过 12%（只按字形数算会放到 33%，太出格）",
+      laid.widest <= 130 * 1.12 + 0.5,
+      "widest=" + laid.widest.toFixed(1) + " / 框宽 130 = 超 " + ((laid.widest / 130 - 1) * 100).toFixed(1) + "%"
+    );
+
+    // allowW 是硬约束：可用横向空间不够时必须老实缩回去
+    const tight = OV.layoutText(m2, "中文中文中文中文中", { x: 0, y: 0, w: 130, h: 20 }, {
+      minFontSize: 6,
+      allowH: 32,
+      allowW: 118,
+    });
+    ok(
+      "轻微溢出：超出可用横向空间时不让溢出",
+      tight.overflowX === false && tight.widest <= 130.5,
+      "fontSize=" + tight.fontSize + " widest=" + tight.widest.toFixed(1) + " overflowX=" + tight.overflowX
+    );
+
+    // 确实放得下的时候不该白白溢出
+    const fits = OV.layoutText(m2, "中文中文中文", { x: 0, y: 0, w: 100, h: 20 }, {
+      minFontSize: 6,
+      allowH: 32,
+    });
+    ok("轻微溢出：放得下时不溢出", fits.overflowX === false, "widest=" + fits.widest.toFixed(1));
   }
 
   // ---------- 行高收紧 ----------

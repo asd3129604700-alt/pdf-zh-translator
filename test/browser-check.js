@@ -235,6 +235,24 @@ function ok(name, cond, detail) {
   // 视觉模型直接翻译时，「翻译方式」不生效，必须禁用而不是留着可点
   ok("视觉模型直接翻译时翻译方式被禁用", ui.afterVision.translateDisabled);
 
+  console.log("\n[2b] 新增控件");
+  const extra = await page.evaluate(function () {
+    const z = document.querySelector("#opt-preview-zoom");
+    const c = document.querySelector("#opt-field-colors");
+    return {
+      zoomExists: !!z,
+      zoomOptions: z ? z.options.length : 0,
+      zoomDefault: z ? z.value : null,
+      colorExists: !!c,
+      colorDefault: c ? c.checked : null,
+    };
+  });
+  ok("预览缩放下拉存在且有 3 档（适应窗口 / 100% / 200%）", extra.zoomExists && extra.zoomOptions === 3, JSON.stringify(extra));
+  ok("预览缩放默认「适应窗口」", extra.zoomDefault === "fit", String(extra.zoomDefault));
+  ok("字段配色开关存在", extra.colorExists);
+  // 默认必须是关的：它会改变原文档观感，不该默认生效
+  ok("字段配色默认关闭", extra.colorDefault === false, String(extra.colorDefault));
+
   if (ASSET_DIR && fs.existsSync(ASSET_DIR)) {
     console.log("\n[3] 真实素材检测：" + ASSET_DIR);
     const files = fs.readdirSync(ASSET_DIR).filter(function (f) {

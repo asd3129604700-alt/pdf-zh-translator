@@ -164,6 +164,69 @@
     }
 
     let overflow = false;
+
+    let overflowX = false;
+
+    // ---------- 次选：允许轻微溢出 ----------
+    //
+    // 参考 ShinobuTranslator 的 minorOverflowMaxGlyphCount=2 /
+    // minorOverflowShrinkMinScale=0.8：如果严格放不下、字号已经被压到理想值的
+    // 0.8 倍以下，那么"字号正确但略微超宽"比"宽度正好但字小一圈"更好看。
+    //
+    // 两条硬约束，避免溢出变成事故：
+    //   · 最多超 2 个字形宽；
+    //   · 不能超出**可用横向空间**（allowW，由调用方按邻居边界算出来）。
+    // 调用方还要保证覆盖范围把这段中文包进去，否则会被裁剪掉。
+    const idealSize = ladder[0];
+    const minScale = opts.minorOverflowShrinkMinScale == null ? 0.8 : opts.minorOverflowShrinkMinScale;
+    const maxOverflowGlyphs = opts.minorOverflowMaxGlyphCount == null ? 2 : opts.minorOverflowMaxGlyphCount;
+    // 除了"最多 2 个字形宽"，再加一道**比例**上限。
+    // 只按字形数算的话，一个装 6 个字的窄框允许超 2 个字 = 超 33%，视觉上明显出格。
+    // 12% 刚好够跨一档字号（阶梯是 0.92，一档 = 8.7%），这正是这个机制要解决的问题。
+    const maxOverflowRatio = opts.maxOverflowRatio == null ? 0.12 : opts.maxOverflowRatio;
+    const allowW = opts.allowW == null ? Infinity : opts.allowW;
+
+    if (!chosen || chosen.fontSize < idealSize * minScale) {
+      for (let i = 0; i < ladder.length; i++) {
+        const fs = ladder[i];
+        // 不比已选结果更大就没意义（阶梯是从大到小的）
+        if (chosen && fs <= chosen.fontSize) break;
+        const lineHeight = fs * lineHeightRatio;
+        // 横向放宽到三重约束里最紧的那个
+        const limit = Math.max(
+          w,
+          Math.min(allowW, w + maxOverflowGlyphs * fs, w * (1 + maxOverflowRatio))
+        );
+        let found = null;
+        for (let s = 0; s < spacings.length; s++) {
+          const sp = spacings[s];
+          const lines = wrapText(measure, text, limit, fs, sp, opts);
+          const blockH = lines.length * lineHeight;
+          if (blockH > allowH) continue;
+          let widest = 0;
+          for (let k = 0; k < lines.length; k++) {
+            widest = Math.max(widest, measure(lines[k], fs, sp));
+          }
+          if (widest <= limit + 0.5) {
+            found = {
+              lines: lines,
+              fontSize: fs,
+              lineHeight: lineHeight,
+              blockH: blockH,
+              widest: widest,
+              spacing: sp,
+            };
+            break;
+          }
+        }
+        if (found) {
+          chosen = found;
+          overflowX = found.widest > w + 0.5;
+          break;
+        }
+      }
+    }
+
     if (!chosen) {
       // 连最小字号都放不下：用最小字号硬排，交给调用方去 clip，并标记溢出
       const fs = minFont;
@@ -211,6 +274,7 @@
       y: y,
       overflow: overflow,
       shrunk: chosen.fontSize < start,
+      overflowX: overflowX,
       // 字距被收紧过（说明是用调字距换来的字号，值得记一笔）
       tightened: chosen.spacing < 0,
     };
@@ -1045,22 +1109,42 @@
           allowTop: lim.top,
           allowBottom: lim.bottom,
           allowH: lim.allowH,
+          // 横向可用空间：允许"轻微溢出"时不能越过邻居
+          allowW: Math.max(1, lim.right - lim.left),
+          minorOverflowMaxGlyphCount: opts.minorOverflowMaxGlyphCount,
+          minorOverflowShrinkMinScale: opts.minorOverflowShrinkMinScale,
           fontFillRatio: opts.fontFillRatio,
           lineHeightRatio: opts.lineHeightRatio,
         });
 
-        // 覆盖范围 = 原框 ∪ 实际文字块，再加一圈余量。
+        // 绘制起点：按原文的对齐方式定位。
+        // 中文一般比英文短，如果原文是居中的标题，一律从左边起画就会明显偏左。
+        let drawX = laid.x;
+        if (ink && laid.widest > 0) {
+          if (ink.alignment === "center") {
+            drawX = ink.x + (ink.w - laid.widest) / 2;
+          } else if (ink.alignment === "right") {
+            drawX = ink.x + ink.w - laid.widest;
+          }
+        }
+
+        // 覆盖范围 = 原框 ∪ 实际文字块 ∪ **真正画出来的中文范围**，再加一圈余量。
+        //
+        // 最后一项是"允许轻微溢出"能成立的前提：中文可能比原框宽一点，
+        // 覆盖范围不跟着走的话，多出来的部分会被 clip 掉。
         //
         // 垂直方向的余量不能省：原文的 bbox 通常不含抗锯齿边缘和降部
         // （g/y/p 的下半截会伸出去），不留余量就会在中文下面留一道灰边。
         const padX = Math.max(2, Math.round(it.h * 0.16));
         const padY = Math.max(2, Math.round(it.h * 0.18));
+        const textL = drawX;
+        const textR = drawX + Math.max(0, laid.widest);
 
         // 夹在邻居允许的范围内：宁可少盖一点，也绝不能压到旁边的文字。
         // 余量加上去之后有可能越过边界（密集排版上尤其常见），所以必须夹。
-        let bx = Math.max(it.x - padX, lim.left);
+        let bx = Math.max(Math.min(it.x - padX, textL - padX), lim.left);
         let by = Math.max(Math.min(it.y, laid.y) - padY, lim.top);
-        let bx1 = Math.min(it.x + it.w + padX, lim.right);
+        let bx1 = Math.min(Math.max(it.x + it.w + padX, textR + padX), lim.right);
         let by1 = Math.min(Math.max(it.y + it.h, laid.y + laid.blockH) + padY, lim.bottom);
         if (bx1 <= bx) bx1 = Math.min(bx + 1, lim.right);
         if (by1 <= by) by1 = Math.min(by + 1, lim.bottom);
@@ -1103,17 +1187,7 @@
         ctx.rect(cover.x, cover.y, cover.w, cover.h);
         ctx.clip();
 
-        // 按原文的对齐方式定位。中文一般比英文短，如果原文是居中的标题，
-        // 一律从左边起画就会明显偏左 —— 而"偏左"正是排版显得难看的一类。
-        let drawX = laid.x;
-        if (ink && laid.widest > 0) {
-          if (ink.alignment === "center") {
-            drawX = ink.x + (ink.w - laid.widest) / 2;
-          } else if (ink.alignment === "right") {
-            drawX = ink.x + ink.w - laid.widest;
-          }
-        }
-
+        // drawX 在上面就算好了（覆盖范围要用它）
         ctx.fillStyle = rgbCss(colorForItem(it, bg, opts));
         ctx.textAlign = "left";
         ctx.textBaseline = "top";

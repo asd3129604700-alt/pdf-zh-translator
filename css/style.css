@@ -505,6 +505,10 @@ code {
 }
 .result-toolbar h2 { margin: 0 0 4px; font-size: 1.15rem; }
 .toolbar-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+/* 工具栏里的缩放选择：做得紧凑一些，别和按钮抢视觉重量 */
+.zoom-field { flex-direction: row; align-items: center; gap: 6px; }
+.zoom-field > span { white-space: nowrap; font-size: 0.8rem; }
+.zoom-field select { padding: 6px 26px 6px 10px; font-size: 0.82rem; border-radius: 999px; }
 
 .warnings {
   margin-bottom: 16px;

@@ -92,6 +92,7 @@
     btnPrev: $("#btn-prev"),
     btnNext: $("#btn-next"),
     btnToggleView: $("#btn-toggle-view"),
+    previewZoom: $("#opt-preview-zoom"),
     btnDownload: $("#btn-download"),
     btnReset: $("#btn-reset"),
     textList: $("#text-list"),
@@ -108,6 +109,8 @@
   // 预览画布的最大显示边长。原实现每次都把 3 倍分辨率的整页画进预览画布，
   // 悬停高亮时会卡；这里按显示尺寸重绘，高亮才能跟得上鼠标。
   const PREVIEW_MAX_SIDE = 1400;
+  // 放大档位时的背板上限：够看清小字，又不至于一次吃掉几百 MB
+  const PREVIEW_ZOOM_MAX_SIDE = 2600;
 
   // 图片没有"原始页面尺寸"这个概念，导出 PDF 时按这个 DPI 反推页面物理大小。
   // 150 是电子文档截图的常见等效值，打出来尺寸不至于离谱。
@@ -119,6 +122,7 @@
     pageIndex: 0,
     showOriginal: false,
     highlight: null,
+    previewZoom: "fit",
     controller: null,
     fileName: "translated-zh.pdf",
     logLines: [],
@@ -1322,13 +1326,27 @@
     const src = state.showOriginal ? page.original : page.translated;
     const canvas = els.previewCanvas;
 
-    // 按显示尺寸重绘，而不是把整页原始分辨率塞进预览画布 ——
-    // 悬停高亮需要频繁重绘，全分辨率重绘会明显卡顿。
-    const k = Math.min(1, PREVIEW_MAX_SIDE / Math.max(src.width, src.height));
+    // 缩放档位。"适应窗口"用一个较小的背板尺寸（悬停高亮要频繁重绘，太大就卡）；
+    // 放大档位才把背板提到接近原分辨率，让人能看清小字到底糊不糊。
+    const zoom = state.previewZoom;
+    const zoomed = zoom !== "fit";
+    const backCap = zoomed ? PREVIEW_ZOOM_MAX_SIDE : PREVIEW_MAX_SIDE;
+
+    const k = Math.min(1, backCap / Math.max(src.width, src.height));
     const cw = Math.max(1, Math.round(src.width * k));
     const ch = Math.max(1, Math.round(src.height * k));
     canvas.width = cw;
     canvas.height = ch;
+
+    // 显示尺寸独立于背板尺寸：放大档位把 canvas 拉大，外层容器负责滚动。
+    // 这样"预览里糊"和"实际糊"就能区分开 —— 很多"糊成一团"其实是预览被缩小了。
+    if (zoomed) {
+      canvas.style.width = Math.round(cw * Number(zoom)) + "px";
+      canvas.style.maxWidth = "none";
+    } else {
+      canvas.style.width = "";
+      canvas.style.maxWidth = "";
+    }
 
     const ctx = canvas.getContext("2d");
     ctx.imageSmoothingEnabled = true;
@@ -1522,6 +1540,12 @@
     });
     els.btnToggleView.addEventListener("click", function () {
       state.showOriginal = !state.showOriginal;
+      renderPreview();
+    });
+    // 预览缩放：默认"适应窗口"。放大档位是为了分辨
+    // "预览里显得糊"和"实际输出糊"，这两件事很容易混。
+    els.previewZoom.addEventListener("change", function () {
+      state.previewZoom = els.previewZoom.value;
       renderPreview();
     });
     els.btnReset.addEventListener("click", resetAll);
