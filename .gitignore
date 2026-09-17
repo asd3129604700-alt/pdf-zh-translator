@@ -1,10 +1,22 @@
+# 依赖
 node_modules/
-test/
-scripts/
-.DS_Store
-*.log
+
+# 测试用的素材（客户资料、截图、PDF）绝对不进仓库
+test-assets/
+samples/
+*.pdf
+
+# 图片素材：仓库里只放代码，不放任何客户资料或截图
 *.jpg
 *.jpeg
 *.png
 *.webp
 *.gif
+*.bmp
+
+# 系统和编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log

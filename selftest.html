@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>自测 · 英文资料中文转换器</title>
+<link rel="stylesheet" href="css/style.css" />
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<style>
+  .st-panel { margin-bottom: 16px; }
+  .st-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
+  .st-out {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    white-space: pre-wrap;
+    background: #f7f5ef;
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    padding: 10px 12px;
+    margin: 8px 0 0;
+    max-height: 340px;
+    overflow: auto;
+  }
+  .st-ok { color: var(--accent-deep); }
+  .st-err { color: var(--danger); }
+  .st-warn { color: var(--warn); }
+  .st-canvas-wrap { overflow: auto; max-height: 460px; border: 1px solid var(--line); border-radius: 10px; background: #f7f4ec; }
+  .st-canvas-wrap canvas { display: block; max-width: 100%; height: auto; background: #fff; }
+  .st-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 0.84rem; }
+  .st-kv dt { color: var(--muted); }
+  .st-kv dd { margin: 0; font-family: var(--mono); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">测</span>
+      <div>
+        <h1>自测页</h1>
+        <p class="tagline">逐环节验证流水线。这个页面不依赖 API Key（除了最后一节）。</p>
+      </div>
+    </div>
+    <div class="header-meta">
+      <a class="link" href="index.html">← 回到主界面</a>
+    </div>
+  </header>
+
+  <!-- 1. 环境 -->
+  <section class="panel st-panel">
+    <h2>1. 环境检查</h2>
+    <p class="muted">确认所有模块和外部库是否加载成功。任何一项显示 ✗ 都要先解决，否则后面必然失败。</p>
+    <div class="st-row"><button class="btn btn-ghost" id="btn-env">运行检查</button></div>
+    <pre class="st-out" id="out-env">尚未运行。</pre>
+  </section>
+
+  <!-- 2. 测试图 -->
+  <section class="panel st-panel">
+    <h2>2. 生成合成测试图</h2>
+    <p class="muted">
+      这张图刻意模拟你的真实输入：<strong>像素干净，但文字边缘不锐利</strong>
+      （先正常绘制文字，再整体做一次 0.7px 模糊，等同于截图被缩放或 JPEG 压缩过的效果）。
+      里面画了 6 行英文，字号 15px 偏小，正好考验小字检测。
+    </p>
+    <div class="st-row">
+      <button class="btn btn-ghost" id="btn-make">生成测试图</button>
+      <label class="field checkbox" style="padding:0">
+        <input type="checkbox" id="chk-boxy" checked />
+        <span>同时叠加检测框（红框）</span>
+      </label>
+    </div>
+    <div class="st-canvas-wrap"><canvas id="cv-test"></canvas></div>
+    <pre class="st-out" id="out-make">尚未生成。</pre>
+  </section>
+
+  <!-- 3. 检测 -->
+  <section class="panel st-panel">
+    <h2>3. 文字区域检测（本地，不需要网络）</h2>
+    <p class="muted">
+      这是本地 OCR 路线里替代「Tesseract 多尺度全图探测」的那一步。
+      期望结果：找到 <strong>约 6 行</strong>，且耗时在几百毫秒以内。
+    </p>
+    <div class="st-row"><button class="btn btn-ghost" id="btn-detect">运行检测</button></div>
+    <pre class="st-out" id="out-detect">尚未运行。</pre>
+  </section>
+
+  <!-- 4. 本地 OCR -->
+  <section class="panel st-panel">
+    <h2>4. 本地 OCR 端到端（需要联网下载语言数据）</h2>
+    <p class="muted">
+      首次运行会从 CDN 下载 Tesseract 引擎和英文语言数据（约 10~15 MB），可能要等十几秒。
+      期望结果：识别出 6 行，且文字与原文基本一致。
+    </p>
+    <div class="st-row">
+      <button class="btn btn-ghost" id="btn-ocr">运行本地 OCR</button>
+      <label class="field checkbox" style="padding:0">
+        <input type="checkbox" id="chk-sharpen" checked />
+        <span>启用放大 + 锐化预处理（推荐）</span>
+      </label>
+    </div>
+    <pre class="st-out" id="out-ocr">尚未运行。</pre>
+  </section>
+
+  <!-- 5. 排版 -->
+  <section class="panel st-panel">
+    <h2>5. 排版与覆盖（本地，不需要网络）</h2>
+    <p class="muted">
+      把英文换成中文并覆盖回原位。重点看两件事：中文有没有<strong>溢出到别的行</strong>，
+      以及背景有没有被盖出突兀的色块。
+    </p>
+    <div class="st-row"><button class="btn btn-ghost" id="btn-overlay">运行排版</button></div>
+    <div class="st-canvas-wrap"><canvas id="cv-overlay"></canvas></div>
+    <pre class="st-out" id="out-overlay">尚未运行。</pre>
+  </section>
+
+  <!-- 6. 视觉模型 -->
+  <section class="panel st-panel">
+    <h2>6. 云端视觉模型端到端（需要你自己的 API Key）</h2>
+    <p class="muted">
+      会拿合成测试图调用一次视觉模型。注意：这是真实计费的请求。
+      这一节验证的是「区域放大 → 模型识别 → 坐标映射回原图」整条链路。
+    </p>
+    <div class="grid2">
+      <label class="field">
+        <span>协议</span>
+        <select id="st-api">
+          <option value="gemini" selected>Gemini（generateContent）</option>
+          <option value="openai">OpenAI 兼容（/chat/completions）</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Base URL</span>
+        <input id="st-base" type="url" value="https://generativelanguage.googleapis.com" spellcheck="false" />
+      </label>
+      <label class="field">
+        <span>API Key</span>
+        <input id="st-key" type="password" spellcheck="false" placeholder="不会被保存，只用于本次请求" />
+      </label>
+      <label class="field">
+        <span>模型</span>
+        <input id="st-model" type="text" value="gemini-2.5-flash" spellcheck="false" />
+      </label>
+    </div>
+    <div class="st-row">
+      <button class="btn btn-ghost" id="btn-vision-test">测试 Key</button>
+      <button class="btn btn-ghost" id="btn-vision">运行视觉识别 + 翻译</button>
+      <button class="btn btn-ghost" id="btn-vision-models">拉取模型列表</button>
+    </div>
+    <div class="st-canvas-wrap"><canvas id="cv-vision"></canvas></div>
+    <pre class="st-out" id="out-vision">尚未运行。</pre>
+  </section>
+
+  <footer class="footer">
+    <p>这个页面只是自测工具，不参与正式流程。</p>
+  </footer>
+</div>
+
+<script src="js/util.js"></script>
+<script src="js/config.js"></script>
+<script src="js/imageproc.js"></script>
+<script src="js/detect.js"></script>
+<script src="js/overlay.js"></script>
+<script src="js/ocr-local.js"></script>
+<script src="js/vision.js"></script>
+<script src="js/translate.js"></script>
+<script src="js/pdf-engine.js"></script>
+<script>
+(function () {
+  "use strict";
+  var U = window.PZUtil;
+
+  var outEnv = document.getElementById("out-env");
+  var outMake = document.getElementById("out-make");
+  var outDetect = document.getElementById("out-detect");
+  var outOcr = document.getElementById("out-ocr");
+  var outOverlay = document.getElementById("out-overlay");
+  var outVision = document.getElementById("out-vision");
+
+  var cvTest = document.getElementById("cv-test");
+  var cvOverlay = document.getElementById("cv-overlay");
+  var cvVision = document.getElementById("cv-vision");
+
+  var testCanvas = null;
+  var detected = null;
+
+  var EXPECTED_LINES = [
+    "MATERIAL SPEC",
+    "Body: 100% Polyester, soft boa",
+    "SEPARATE PIECE - printed graphic",
+    "EMBROIDERY on face & hair",
+    "PMS 1234 C",
+    "Not for children under 3 years"
+  ];
+
+  // 中文译文用于排版测试。故意写得比原文长短不一，好看出字号自适应的效果。
+  var EXPECTED_ZH = [
+    "材质规格",
+    "主体：100% 聚酯纤维，柔软仿毛皮",
+    "独立部件 — 印花图案",
+    "面部与头发刺绣",
+    "PMS 1234 C",
+    "不适合 3 岁以下儿童"
+  ];
+
+  function setOut(el, text, cls) {
+    el.textContent = text;
+    el.className = "st-out" + (cls ? " " + cls : "");
+  }
+
+  function showCanvas(target, src) {
+    target.width = src.width;
+    target.height = src.height;
+    var ctx = target.getContext("2d");
+    ctx.clearRect(0, 0, src.width, src.height);
+    ctx.drawImage(src, 0, 0);
+  }
+
+  function drawBoxes(canvas, boxes, color) {
+    var ctx = canvas.getContext("2d");
+    ctx.save();
+    ctx.strokeStyle = color || "#e5533d";
+    ctx.lineWidth = 2;
+    boxes.forEach(function (b) {
+      ctx.strokeRect(b.x, b.y, b.w, b.h);
+    });
+    ctx.restore();
+  }
+
+  /* ---------------- 1. 环境 ---------------- */
+
+  document.getElementById("btn-env").addEventListener("click", function () {
+    var lines = [];
+    var allOk = true;
+
+    function check(label, ok, extra) {
+      lines.push((ok ? "  ✓ " : "  ✗ ") + label + (extra ? "  " + extra : ""));
+      if (!ok) allOk = false;
+    }
+
+    lines.push("【本工具模块】");
+    ["PZUtil", "PZConfig", "PZImage", "PZDetect", "PZOverlay", "PZOcr", "PZVision", "PZTranslate", "PZPdf"].forEach(
+      function (name) {
+        check(name, !!window[name]);
+      }
+    );
+
+    lines.push("");
+    lines.push("【外部库（走 CDN，离线时会失败）】");
+    check("pdf.js", !!(window.pdfjsLib && window.pdfjsLib.getDocument));
+    check("jsPDF", !!(window.jspdf && window.jspdf.jsPDF));
+    check("Tesseract.js", !!(window.Tesseract && window.Tesseract.createWorker));
+    if (window.Tesseract) {
+      check(
+        "Tesseract.createScheduler（并行识别必需）",
+        typeof window.Tesseract.createScheduler === "function"
+      );
+    }
+
+    lines.push("");
+    lines.push("【运行环境】");
+    lines.push("  location.protocol = " + location.protocol);
+    if (location.protocol === "file:") {
+      lines.push(
+        "  ! 你是在 file:// 下打开这个页面的。PDF.js 的 worker 和 Tesseract 的 worker\n" +
+          "    在 file:// 下会被浏览器拦掉。云端视觉识别不受影响，\n" +
+          "    但如果要测本地 OCR，请用 http 打开（例如在目录里跑 python -m http.server）。"
+      );
+    }
+    lines.push("  devicePixelRatio = " + window.devicePixelRatio);
+    lines.push("  hardwareConcurrency = " + (navigator.hardwareConcurrency || "未知"));
+    check("OffscreenCanvas（非必需）", typeof window.OffscreenCanvas !== "undefined");
+
+    lines.push("");
+    lines.push(allOk ? "结论：环境正常。" : "结论：有模块没加载，先解决上面标 ✗ 的项。");
+    setOut(outEnv, lines.join("\n"), allOk ? "st-ok" : "st-err");
+  });
+
+  /* ---------------- 2. 合成测试图 ---------------- */
+
+  document.getElementById("btn-make").addEventListener("click", function () {
+    var W = 1000;
+    var H = 560;
+
+    // 第一步：画一张"干净锐利"的图
+    var sharp = U.createCanvas(W, H);
+    var ctx = sharp.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#1a1a1a";
+    ctx.textBaseline = "top";
+    ctx.font = "500 15px Arial, Helvetica, sans-serif";
+    EXPECTED_LINES.forEach(function (t, i) {
+      ctx.fillText(t, 60, 70 + i * 70);
+    });
+    // 再加一条实心横线和一个实心色块，用来验证"非文字不会被当成文字"
+    ctx.fillStyle = "#333";
+    ctx.fillRect(60, 500, 880, 2);
+    ctx.fillStyle = "#8a2b2b";
+    ctx.fillRect(700, 60, 120, 60);
+
+    // 第二步：整体模糊，模拟"被缩放过 / JPEG 压过"的糊边。
+    // 这正是用户素材的特征，也是 Tesseract 最容易失败的地方。
+    var blurred = U.createCanvas(W, H);
+    var bctx = blurred.getContext("2d");
+    bctx.fillStyle = "#ffffff";
+    bctx.fillRect(0, 0, W, H);
+    bctx.filter = "blur(0.7px)";
+    bctx.drawImage(sharp, 0, 0);
+    bctx.filter = "none";
+
+    testCanvas = blurred;
+    detected = null;
+    showCanvas(cvTest, blurred);
+
+    setOut(
+      outMake,
+      "已生成 " + W + "×" + H + " 测试图。\n" +
+        "包含 " + EXPECTED_LINES.length + " 行英文文字（15px，故意偏小）\n" +
+        "额外包含 1 条实心横线 + 1 个实心色块，用于验证误检\n" +
+        "全图做过一次 0.7px 模糊，模拟不锐利的文字边缘。"
+    );
+  });
+
+  /* ---------------- 3. 检测 ---------------- */
+
+  document.getElementById("btn-detect").addEventListener("click", function () {
+    if (!testCanvas) {
+      setOut(outDetect, "请先在上一步生成测试图。", "st-warn");
+      return;
+    }
+    if (!window.PZDetect) {
+      setOut(outDetect, "PZDetect 未加载。", "st-err");
+      return;
+    }
+
+    var t0 = performance.now();
+    var res;
+    try {
+      res = window.PZDetect.detect(testCanvas, {});
+    } catch (err) {
+      setOut(outDetect, "检测抛异常：" + (err && err.message ? err.message : err), "st-err");
+      return;
+    }
+    var ms = performance.now() - t0;
+    detected = res;
+
+    showCanvas(cvTest, testCanvas);
+    if (document.getElementById("chk-boxy").checked) {
+      drawBoxes(cvTest, res.lines, "#e5533d");
+      drawBoxes(cvTest, res.regions, "rgba(31,111,92,0.55)");
+    }
+
+    var lines = [];
+    lines.push("耗时 " + Math.round(ms) + "ms");
+    lines.push("找到 " + res.lines.length + " 行 / " + res.regions.length + " 个区域");
+    if (res.stats) {
+      lines.push("内部统计：" + JSON.stringify(res.stats));
+    }
+    lines.push("");
+    lines.push("检测到的行（按 y 排序）：");
+    res.lines
+      .slice()
+      .sort(function (a, b) {
+        return a.y - b.y;
+      })
+      .forEach(function (l, i) {
+        lines.push(
+          "  " + String(i + 1).padStart(2, " ") + ". y=" + Math.round(l.y) +
+            " h=" + Math.round(l.h) + " w=" + Math.round(l.w) + "   " +
+            (l.text ? '"' + l.text + '"' : "(仅定位，无文字)")
+        );
+      });
+
+    lines.push("");
+    var verdict;
+    var cls = "st-ok";
+    var n = res.lines.length;
+    if (n === 0) {
+      verdict = "✗ 一行都没找到。检测算法在合成图上就失效了，需要修。";
+      cls = "st-err";
+    } else if (n < EXPECTED_LINES.length - 2) {
+      verdict = "! 只找到 " + n + " 行，少于预期的 " + EXPECTED_LINES.length + " 行，有漏检。";
+      cls = "st-warn";
+    } else if (n > EXPECTED_LINES.length + 6) {
+      verdict = "! 找到 " + n + " 行，明显多于预期，可能把横线/色块也当成了文字。";
+      cls = "st-warn";
+    } else {
+      verdict = "✓ 行数与预期（" + EXPECTED_LINES.length + "）基本一致。";
+    }
+
+    // 单独验证两个已知反例
+    var bottomBand = res.lines.filter(function (l) {
+      return l.y > 470 && l.h < 12 && l.w > 400;
+    });
+    if (bottomBand.length) {
+      verdict += "\n✗ 第 500px 处的实心横线被误判成文字行了（墨密度过滤没生效）。";
+      cls = "st-err";
+    } else {
+      verdict += "\n✓ 实心横线没有被误判成文字。";
+    }
+    var blockHit = res.lines.filter(function (l) {
+      return l.x > 680 && l.x < 840 && l.y > 40 && l.y < 140 && l.w > 80 && l.h > 40;
+    });
+    if (blockHit.length) {
+      verdict += "\n✗ 实心色块被误判成文字了。";
+      cls = "st-err";
+    } else {
+      verdict += "\n✓ 实心色块没有被误判成文字。";
+    }
+
+    lines.push(verdict);
+    setOut(outDetect, lines.join("\n"), cls);
+  });
+
+  /* ---------------- 4. 本地 OCR ---------------- */
+
+  document.getElementById("btn-ocr").addEventListener("click", async function () {
+    if (!testCanvas) {
+      setOut(outOcr, "请先在第 2 步生成测试图。", "st-warn");
+      return;
+    }
+    if (!window.PZOcr) {
+      setOut(outOcr, "PZOcr 未加载。", "st-err");
+      return;
+    }
+
+    var sharpen = document.getElementById("chk-sharpen").checked;
+    setOut(outOcr, "正在初始化 Tesseract（首次需要下载语言数据，请耐心等待）…");
+
+    var logs = [];
+    var t0 = performance.now();
+    try {
+      // 这里特意给一个"空检测结果"，走整图兜底路径；
+      // 想测条带路径就把 detected.lines 传进去。
+      var lines = detected ? detected.lines : [];
+      var res = await window.PZOcr.recognize(
+        testCanvas,
+        { lines: lines },
+        {
+          onLog: function (m) {
+            logs.push(m);
+            setOut(outOcr, "进行中…\n" + logs.slice(-6).join("\n"));
+          },
+          onProgress: function (p) {
+            if (p && p.message) {
+              logs.push(p.message);
+              setOut(outOcr, "进行中…\n" + logs.slice(-6).join("\n"));
+            }
+          }
+        }
+      );
+      var ms = performance.now() - t0;
+
+      var out = [];
+      out.push("耗时 " + Math.round(ms) + "ms（含引擎初始化）");
+      out.push("识别出 " + res.lines.length + " 行");
+      if (res.stats) out.push("统计：" + JSON.stringify(res.stats));
+      out.push("");
+      out.push("识别结果（按 y 排序，可与上面第 2 步的原文逐条对照）：");
+      res.lines
+        .slice()
+        .sort(function (a, b) {
+          return a.y - b.y;
+        })
+        .forEach(function (l, i) {
+          out.push("  " + String(i + 1).padStart(2, " ") + ". " + l.text);
+        });
+
+      out.push("");
+      out.push("原文：");
+      EXPECTED_LINES.forEach(function (t) {
+        out.push("     " + t);
+      });
+
+      var matched = 0;
+      res.lines.forEach(function (l) {
+        var best = 0;
+        EXPECTED_LINES.forEach(function (e) {
+          best = Math.max(best, U.similarity(l.text, e));
+        });
+        if (best > 0.7) matched++;
+      });
+      // 一行原文可能被拆成多行识别，也可能多行被并成一行，所以这里是粗判
+      var cls = matched >= EXPECTED_LINES.length - 1 ? "st-ok" : "st-warn";
+      out.push("");
+      out.push(
+        "粗略匹配：" + matched + " / " + EXPECTED_LINES.length +
+          " 条识别结果能对上原文。" +
+          (cls === "st-ok" ? " ✓" : " ! 有偏差，看上面的逐条对照。")
+      );
+      setOut(outOcr, out.join("\n"), cls);
+    } catch (err) {
+      setOut(
+        outOcr,
+        "失败：" + (err && err.message ? err.message : err) +
+          "\n\n常见原因：\n" +
+          "  · 在 file:// 下打开，worker 被浏览器拦截 → 改用 http 打开\n" +
+          "  · CDN 被墙或断网 → 语言数据下载失败\n" +
+          "\n云端视觉识别不受这个影响。",
+        "st-err"
+      );
+    }
+  });
+
+  /* ---------------- 5. 排版 ---------------- */
+
+  document.getElementById("btn-overlay").addEventListener("click", function () {
+    if (!testCanvas) {
+      setOut(outOverlay, "请先在第 2 步生成测试图。", "st-warn");
+      return;
+    }
+    if (!window.PZOverlay) {
+      setOut(outOverlay, "PZOverlay 未加载。", "st-err");
+      return;
+    }
+
+    // 用已知的原文行位置构造 items：模拟"识别 + 翻译"已经完成
+    var ctx0 = testCanvas.getContext("2d");
+    ctx0.font = "500 15px Arial, Helvetica, sans-serif";
+    var items = EXPECTED_LINES.map(function (t, i) {
+      var w = ctx0.measureText(t).width;
+      return {
+        x: 60,
+        y: 70 + i * 70,
+        w: Math.max(w, 24),
+        h: 19,
+        src: t,
+        dst: EXPECTED_ZH[i],
+        engine: "selftest"
+      };
+    });
+    // 再加两条不相邻的，验证"不压到别的行"
+    items.push({
+      x: 700, y: 60, w: 120, h: 60,
+      src: "(color block)", dst: "（这是色块，不该被覆盖）", engine: "selftest"
+    });
+
+    var t0 = performance.now();
+    var out;
+    try {
+      out = window.PZOverlay.render(testCanvas, items, { cover: true });
+    } catch (err) {
+      setOut(outOverlay, "排版抛异常：" + (err && err.message ? err.message : err), "st-err");
+      return;
+    }
+    var ms = performance.now() - t0;
+    showCanvas(cvOverlay, out);
+    drawBoxes(cvOverlay, items, "rgba(31,111,92,0.4)");
+
+    var s = out._overlayStats || {};
+    var lines = [];
+    lines.push("耗时 " + Math.round(ms) + "ms");
+    lines.push("统计：" + JSON.stringify(s));
+    lines.push("");
+    lines.push("逐条检查：");
+    lines.push("  · 中文是否都落在各自的绿框内、有没有越过框压到下一行");
+    lines.push("  · 覆盖底色是否和周围背景一致（合成图是纯白底，应该完全看不出补丁）");
+    lines.push("  · 最后一条「色块」的译文用了浅色字（因为底色是深红），红块本身不该被抹掉");
+    lines.push("");
+    if (s.overflow) {
+      lines.push("! 有 " + s.overflow + " 处译文在最小字号下仍放不下（已被裁剪）。");
+    } else if (s.drawn) {
+      lines.push("✓ " + s.drawn + " 条译文全部在可用空间内排下，没有触发裁剪。");
+    }
+    setOut(outOverlay, lines.join("\n"), s.overflow ? "st-warn" : "st-ok");
+  });
+
+  /* ---------------- 6. 视觉模型 ---------------- */
+
+  function visionOpts(extra) {
+    return Object.assign(
+      {
+        api: document.getElementById("st-api").value,
+        baseUrl: document.getElementById("st-base").value.trim(),
+        apiKey: document.getElementById("st-key").value.trim(),
+        model: document.getElementById("st-model").value.trim(),
+        targetLang: "zh-CN",
+        glossaryEntries: [],
+        profileHint: "",
+        translate: true
+      },
+      extra || {}
+    );
+  }
+
+  document.getElementById("btn-vision-test").addEventListener("click", async function () {
+    if (!window.PZVision) {
+      setOut(outVision, "PZVision 未加载。", "st-err");
+      return;
+    }
+    setOut(outVision, "正在测试连接…");
+    try {
+      var r = await window.PZVision.testKey(visionOpts());
+      setOut(
+        outVision,
+        "✓ 连接成功\n  模型：" + r.model + "\n  端点：" + r.endpoint +
+          (r.latencyMs ? "\n  延迟：" + r.latencyMs + "ms" : ""),
+        "st-ok"
+      );
+    } catch (err) {
+      setOut(outVision, "✗ 连接失败：" + (err && err.message ? err.message : err), "st-err");
+    }
+  });
+
+  document.getElementById("btn-vision-models").addEventListener("click", async function () {
+    if (!window.PZVision) {
+      setOut(outVision, "PZVision 未加载。", "st-err");
+      return;
+    }
+    setOut(outVision, "正在拉取模型列表…");
+    try {
+      var ids = await window.PZVision.listModels(visionOpts());
+      setOut(outVision, "✓ 拉取到 " + ids.length + " 个模型：\n  " + ids.join("\n  "), "st-ok");
+    } catch (err) {
+      setOut(outVision, "✗ 拉取失败：" + (err && err.message ? err.message : err), "st-err");
+    }
+  });
+
+  document.getElementById("btn-vision").addEventListener("click", async function () {
+    if (!testCanvas) {
+      setOut(outVision, "请先在第 2 步生成测试图。", "st-warn");
+      return;
+    }
+    if (!window.PZVision) {
+      setOut(outVision, "PZVision 未加载。", "st-err");
+      return;
+    }
+    var opts = visionOpts();
+    if (!opts.apiKey) {
+      setOut(outVision, "请先填写 API Key。", "st-warn");
+      return;
+    }
+
+    var logs = [];
+    function pushLog(m) {
+      logs.push(m);
+      setOut(outVision, "进行中…\n" + logs.slice(-8).join("\n"));
+    }
+
+    setOut(outVision, "正在进行视觉识别（这是真实计费请求）…");
+    var t0 = performance.now();
+    try {
+      var res = await window.PZVision.translate(testCanvas, opts, {
+        onLog: pushLog,
+        onProgress: function (p) {
+          if (p && p.message) pushLog(p.message);
+        }
+      });
+      var ms = performance.now() - t0;
+
+      var lines = [];
+      lines.push("耗时 " + Math.round(ms) + "ms");
+      lines.push("统计：" + JSON.stringify(res.stats || {}));
+      lines.push("");
+      lines.push("识别 + 翻译结果（" + res.items.length + " 条）：");
+      res.items
+        .slice()
+        .sort(function (a, b) {
+          return a.y - b.y;
+        })
+        .forEach(function (it, i) {
+          lines.push(
+            "  " + String(i + 1).padStart(2, " ") +
+              ". [" + it.source + "] " +
+              JSON.stringify(it.src) + " → " + JSON.stringify(it.dst) +
+              "   @(" + Math.round(it.x) + "," + Math.round(it.y) + " " + Math.round(it.w) + "×" + Math.round(it.h) + ")"
+          );
+        });
+
+      // 把结果画出来（覆盖 + 边框），直观看坐标映射对不对
+      var composed = window.PZOverlay.render(testCanvas, res.items, { cover: true });
+      showCanvas(cvVision, composed);
+
+      lines.push("");
+      lines.push("对照原文（共 " + EXPECTED_LINES.length + " 行）：");
+      EXPECTED_LINES.forEach(function (t) { lines.push("     " + t); });
+
+      var matched = 0;
+      res.items.forEach(function (it) {
+        var best = 0;
+        EXPECTED_LINES.forEach(function (e) {
+          best = Math.max(best, U.similarity(it.src, e));
+        });
+        if (best > 0.7) matched++;
+      });
+      lines.push("");
+      var cls = matched >= EXPECTED_LINES.length - 1 ? "st-ok" : "st-warn";
+      lines.push("粗略匹配：" + matched + " 条能对上原文。");
+      lines.push("同时请看右边／上面的预览图：中文是否覆盖在对应英文的位置上。");
+      setOut(outVision, lines.join("\n"), cls);
+    } catch (err) {
+      setOut(
+        outVision,
+        "✗ 失败：" + (err && err.message ? err.message : err),
+        "st-err"
+      );
+    }
+  });
+
+  // 打开时自动跑一次环境检查
+  document.getElementById("btn-env").click();
+})();
+</script>
+</body>
+</html>

@@ -3,9 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PDF / 图片 中文转换器</title>
+  <title>英文资料中文转换器</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231f6f5c'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-size='16' fill='%23f4fffb' font-family='sans-serif'%3E译%3C/text%3E%3C/svg%3E" />
   <link rel="stylesheet" href="css/style.css" />
+  <!-- 外部库：pdf.js（PDF 解析）、jsPDF（导出）、Tesseract.js（本地 OCR，仅本地引擎需要） -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
@@ -16,18 +17,19 @@
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">译</span>
         <div>
-          <h1>PDF / 图片 中文转换器</h1>
-          <p class="tagline">上传文件 · 识别文字 · 生成清晰中文版</p>
+          <h1>英文资料中文转换器</h1>
+          <p class="tagline">PDF / 图片 · 识别英文 · 译成中文 · 覆盖回原位 · 导出 PDF</p>
         </div>
       </div>
       <div class="header-meta">
-        <span class="pill" id="mode-pill">普通模式</span>
-        <a class="link" href="https://github.com/DonutShinobu/ShinobuTranslator" target="_blank" rel="noreferrer">灵感来源</a>
+        <span class="pill" id="engine-pill">未选择</span>
+        <span class="pill subtle" id="version-pill"></span>
       </div>
     </header>
 
     <main>
-      <section id="panel-upload" class="panel upload-panel">
+      <!-- ============================ 上传与配置 ============================ -->
+      <section id="panel-upload" class="panel">
         <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="上传 PDF 或图片">
           <div class="dropzone-inner">
             <div class="drop-icon" aria-hidden="true">
@@ -39,157 +41,185 @@
               </svg>
             </div>
             <h2>拖入 PDF，或多选图片</h2>
-            <p>PDF（1 个）或 JPG / PNG / WebP（可多选）</p>
+            <p>PDF（1 个，带文字层时直接提取，扫描页自动按图片识别）或 JPG / PNG / WebP（可多选）</p>
             <label class="btn btn-primary" for="file-input">选择文件</label>
             <input id="file-input" type="file" accept="application/pdf,.pdf,image/*,.jpg,.jpeg,.png,.webp,.bmp" multiple hidden />
             <p id="file-list" class="file-list hidden"></p>
           </div>
         </div>
 
-        <!-- ========== Mode ========== -->
-        <div class="mode-block">
-          <div class="block-title">处理模式</div>
-          <div class="mode-cards" role="radiogroup" aria-label="处理模式">
-            <label class="mode-card">
-              <input type="radio" name="run-mode" value="normal" id="mode-normal" checked />
-              <div class="mode-card-body">
-                <div class="mode-card-title">普通模式</div>
-                <div class="mode-card-desc">
-                  本地 OCR + 免费翻译<br />
-                  <strong>不调用任何付费 / 第三方大模型 API</strong>
+        <!-- ---------- 识别引擎 ---------- -->
+        <div class="block">
+          <div class="block-title">识别引擎 <span class="muted tiny">图片走这里；PDF 有文字层时自动直接提取</span></div>
+          <div class="cards" role="radiogroup" aria-label="识别引擎">
+            <label class="card">
+              <input type="radio" name="ocr-engine" id="opt-ocr-engine-vision" value="vision" checked />
+              <div class="card-body">
+                <div class="card-title">云端视觉模型 <span class="tag-rec">推荐</span></div>
+                <div class="card-desc">
+                  把图片交给视觉大模型识别并翻译。<br />
+                  <strong>小字、糊字、彩底字最准</strong>，需要 API Key。
                 </div>
               </div>
             </label>
-            <label class="mode-card">
-              <input type="radio" name="run-mode" value="complex" id="mode-complex" />
-              <div class="mode-card-body">
-                <div class="mode-card-title">复杂模式</div>
-                <div class="mode-card-desc">
-                  先探测文字框，再放大识别<br />
-                  <strong>按文字区域裁切放大，不是固定切 2/4 块</strong>
+            <label class="card">
+              <input type="radio" name="ocr-engine" id="opt-ocr-engine-local" value="local" />
+              <div class="card-body">
+                <div class="card-title">本地 OCR</div>
+                <div class="card-desc">
+                  浏览器内 Tesseract 识别，图片不出本机。<br />
+                  <strong>免费、可离线</strong>，对模糊小字弱于视觉模型。
                 </div>
               </div>
             </label>
           </div>
-          <p class="hint" id="mode-hint">
-            普通模式适合清晰截图、文字层 PDF。密图、小字、彩标建议用复杂模式。
-          </p>
+          <p class="hint" id="engine-hint"></p>
         </div>
 
-        <!-- ========== Normal options ========== -->
-        <div id="normal-options" class="options">
+        <!-- ---------- 通用选项 ---------- -->
+        <div class="options">
           <label class="field">
             <span>目标语言</span>
-            <select id="opt-lang">
+            <select id="opt-target-lang">
               <option value="zh-CN" selected>简体中文</option>
               <option value="zh-TW">繁體中文</option>
             </select>
           </label>
-          <label class="field">
-            <span>免费翻译源</span>
-            <select id="opt-service">
-              <option value="auto" selected>自动（Google / MyMemory）</option>
-              <option value="google">Google 翻译</option>
-              <option value="mymemory">MyMemory</option>
-              <option value="dict">仅本地词表</option>
-            </select>
-          </label>
-          <label class="field">
-            <span>图片识别</span>
-            <select id="opt-image-mode">
-              <option value="ocr" selected>本地 OCR（快速）</option>
-              <option value="tiled">本地切块 OCR（小字更好）</option>
+          <label class="field" id="translate-engine-field">
+            <span>翻译方式 <span class="muted tiny">本地 OCR 时生效</span></span>
+            <select id="opt-translate-engine">
+              <option value="free" selected>免费公共接口（Google / MyMemory）</option>
+              <option value="llm">大模型翻译（质量最好）</option>
+              <option value="dict">仅术语表（不联网）</option>
             </select>
           </label>
           <label class="field checkbox">
             <input type="checkbox" id="opt-cover" checked />
-            <span>覆盖原文后再写中文</span>
+            <span>用中文覆盖原文位置</span>
           </label>
           <label class="field checkbox">
             <input type="checkbox" id="opt-preserve-codes" checked />
-            <span>保留 PMS / 色号 / SKU</span>
+            <span>保留型号 / 色号 / 尺寸代码</span>
           </label>
         </div>
 
-        <!-- ========== Complex API ========== -->
-        <div id="complex-options" class="complex-block hidden">
-          <div class="block-title">API 配置（复杂模式必填）</div>
+        <!-- ---------- 视觉模型配置 ---------- -->
+        <div class="apibox" id="vision-box">
+          <div class="apibox-head">
+            <h3>视觉模型设置</h3>
+            <span class="badge" id="vision-status">未配置</span>
+          </div>
 
-          <div class="options">
+          <div class="grid2">
             <label class="field">
-              <span>目标语言</span>
-              <select id="opt-lang-c">
-                <option value="zh-CN" selected>简体中文</option>
-                <option value="zh-TW">繁體中文</option>
-              </select>
+              <span>服务商</span>
+              <select id="opt-vision-provider"></select>
             </label>
-            <label class="field">
-              <span>接口类型</span>
-              <select id="opt-provider">
-                <option value="deepseek" selected>DeepSeek（文本翻译）</option>
-                <option value="openai">OpenAI 兼容（文本翻译）</option>
-                <option value="gemini">Gemini（图片视觉识别）</option>
-              </select>
-            </label>
-            <label class="field checkbox">
-              <input type="checkbox" id="opt-cover-c" checked />
-              <span>覆盖原文后再写中文</span>
-            </label>
-            <label class="field checkbox">
-              <input type="checkbox" id="opt-preserve-codes-c" checked />
-              <span>保留 PMS / 色号 / SKU</span>
+            <label class="field grow">
+              <span>Base URL</span>
+              <input id="opt-vision-base" type="url" autocomplete="off" spellcheck="false" placeholder="https://..." />
             </label>
           </div>
 
-          <div class="api-panel">
-            <div class="api-panel-head">
-              <h3>接口设置</h3>
-              <span class="api-badge" id="api-status-badge">未配置</span>
-            </div>
-
-            <div class="api-grid">
-              <label class="field">
-                <span>Base URL</span>
-                <input id="opt-base-url" type="url" placeholder="https://api.deepseek.com" autocomplete="off" spellcheck="false" />
-              </label>
-              <label class="field grow">
-                <span>API Key</span>
-                <input id="opt-api-key" type="password" placeholder="sk-... 或 AIza..." autocomplete="off" spellcheck="false" />
-              </label>
-            </div>
-
-            <div class="api-row">
-              <button type="button" class="btn btn-ghost" id="btn-fetch-models">拉取模型列表</button>
-              <button type="button" class="btn btn-ghost" id="btn-test-api">测试连接</button>
-              <span class="muted tiny" id="api-links">
-                <a id="link-key" href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">申请 Key</a>
-              </span>
-            </div>
-
-            <label class="field model-field">
-              <span>模型（可下拉选择，或手动填任意模型 ID）</span>
-              <select id="opt-model">
-                <option value="deepseek-v4-pro">deepseek-v4-pro（推荐）</option>
-                <option value="deepseek-flash">deepseek-flash</option>
-                <option value="deepseek-chat">deepseek-chat</option>
-                <option value="deepseek-reasoner">deepseek-reasoner</option>
-              </select>
-              <input id="opt-model-custom" type="text" placeholder="或手动输入网关模型 ID（优先于下拉框）" autocomplete="off" spellcheck="false" />
+          <div class="grid2">
+            <label class="field grow">
+              <span>API Key</span>
+              <input id="opt-vision-key" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴你的 Key" />
             </label>
-
-            <p id="api-test-result" class="api-test-result muted"></p>
-
-            <div class="api-note" id="api-note">
-              <strong>DeepSeek：</strong>优化英文→中文译文质量（识别仍用本地切块 OCR）。<br />
-              <strong>Gemini：</strong>直接看图找文字并翻译，适合彩标 / 艺术字。<br />
-              未配置成功时不会静默改用免费接口。
-            </div>
+            <label class="field">
+              <span>模型</span>
+              <select id="opt-vision-model"></select>
+              <input id="opt-vision-model-custom" type="text" autocomplete="off" spellcheck="false"
+                     placeholder="或手动输入模型 ID（优先于上方下拉框）" />
+            </label>
           </div>
+
+          <div class="row">
+            <button type="button" class="btn btn-ghost" id="btn-vision-models">拉取模型列表</button>
+            <button type="button" class="btn btn-ghost" id="btn-vision-test">测试连接</button>
+            <a class="link tiny" id="vision-key-link" href="#" target="_blank" rel="noreferrer">申请 Key</a>
+          </div>
+
+          <label class="field checkbox compact">
+            <input type="checkbox" id="opt-vision-recognize-only" />
+            <span>
+              只识别英文，翻译交给上面的「翻译方式」
+              <span class="muted tiny">勾上之后视觉模型只做 OCR，译文由翻译引擎产出（术语表控制更严格，但会多花一次调用）</span>
+            </span>
+          </label>
+
+          <p class="apibox-note" id="vision-note"></p>
+          <p class="apibox-result muted" id="vision-note-result"></p>
+        </div>
+
+        <!-- ---------- 文本大模型配置 ---------- -->
+        <div class="apibox hidden" id="llm-box">
+          <div class="apibox-head">
+            <h3>文本大模型设置</h3>
+            <span class="badge" id="llm-status">未配置</span>
+          </div>
+
+          <div class="grid2">
+            <label class="field">
+              <span>服务商</span>
+              <select id="opt-llm-provider"></select>
+            </label>
+            <label class="field grow">
+              <span>Base URL</span>
+              <input id="opt-llm-base" type="url" autocomplete="off" spellcheck="false" />
+            </label>
+          </div>
+
+          <div class="grid2">
+            <label class="field grow">
+              <span>API Key</span>
+              <input id="opt-llm-key" type="password" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="field">
+              <span>模型</span>
+              <select id="opt-llm-model"></select>
+              <input id="opt-llm-model-custom" type="text" autocomplete="off" spellcheck="false"
+                     placeholder="或手动输入模型 ID" />
+            </label>
+          </div>
+
+          <div class="row">
+            <button type="button" class="btn btn-ghost" id="btn-llm-models">拉取模型列表</button>
+            <button type="button" class="btn btn-ghost" id="btn-llm-test">测试连接</button>
+            <a class="link tiny" id="llm-key-link" href="#" target="_blank" rel="noreferrer">申请 Key</a>
+          </div>
+          <p class="apibox-note" id="llm-note"></p>
+          <p class="apibox-result muted" id="llm-result"></p>
+        </div>
+
+        <!-- ---------- 领域配置 ---------- -->
+        <details class="domain">
+          <summary>领域与术语表 <span class="muted tiny">换客户资料时改这里，不用改代码</span></summary>
+          <div class="domain-body">
+            <label class="field">
+              <span>领域预设</span>
+              <select id="opt-profile"></select>
+            </label>
+            <label class="field">
+              <span>背景说明 <span class="muted tiny">会作为提示词的一部分告诉模型</span></span>
+              <input id="opt-profile-hint" type="text" autocomplete="off" spellcheck="false"
+                     placeholder="例如：这是机械零件的装配说明图" />
+            </label>
+            <label class="field">
+              <span>术语表 <span class="muted tiny">每行一条，格式 <code>原文 =&gt; 译文</code>；右侧留空表示保持原样不翻译；<code>#</code> 开头是注释</span></span>
+              <textarea id="opt-glossary" rows="8" spellcheck="false"
+                        placeholder="Torque =&gt; 扭矩&#10;hololive =&gt; 原样"></textarea>
+            </label>
+          </div>
+        </details>
+
+        <div class="actions">
+          <button type="button" class="btn btn-primary btn-lg" id="btn-start" disabled>开始转换</button>
         </div>
       </section>
 
-      <!-- Processing -->
-      <section id="panel-process" class="panel process-panel hidden">
+      <!-- ============================ 处理中 ============================ -->
+      <section id="panel-process" class="panel hidden">
         <div class="process-head">
           <h2 id="process-title">正在处理</h2>
           <p id="process-file" class="muted"></p>
@@ -197,29 +227,35 @@
         <div class="progress-track" aria-hidden="true">
           <div id="progress-bar" class="progress-bar"></div>
         </div>
+        <p id="progress-text" class="progress-text">准备中…</p>
         <ol class="steps" id="steps">
           <li data-step="load"><span class="step-dot"></span>加载文件</li>
-          <li data-step="extract"><span class="step-dot"></span>提取 / OCR</li>
-          <li data-step="translate"><span class="step-dot"></span>翻译为中文</li>
-          <li data-step="compose"><span class="step-dot"></span>生成中文页</li>
-          <li data-step="done"><span class="step-dot"></span>完成</li>
+          <li data-step="detect"><span class="step-dot"></span>定位文字</li>
+          <li data-step="recognize"><span class="step-dot"></span>识别</li>
+          <li data-step="translate"><span class="step-dot"></span>翻译</li>
+          <li data-step="compose"><span class="step-dot"></span>排版导出</li>
         </ol>
-        <p id="process-log" class="log"></p>
+        <pre id="process-log" class="log"></pre>
+        <div class="actions">
+          <button type="button" class="btn btn-ghost" id="btn-cancel">取消</button>
+        </div>
       </section>
 
-      <!-- Result -->
-      <section id="panel-result" class="panel result-panel hidden">
+      <!-- ============================ 结果 ============================ -->
+      <section id="panel-result" class="panel hidden">
         <div class="result-toolbar">
           <div>
             <h2>中文版预览</h2>
             <p class="muted" id="result-meta"></p>
           </div>
           <div class="toolbar-actions">
-            <button type="button" class="btn btn-ghost" id="btn-toggle-view">切换对照</button>
+            <button type="button" class="btn btn-ghost" id="btn-toggle-view">切换原稿 / 中文版</button>
             <button type="button" class="btn btn-primary" id="btn-download">下载中文 PDF</button>
             <button type="button" class="btn btn-ghost" id="btn-reset">重新上传</button>
           </div>
         </div>
+
+        <div id="result-warnings" class="warnings hidden"></div>
 
         <div class="preview-layout">
           <div class="preview-stage">
@@ -244,21 +280,34 @@
         </div>
       </section>
 
+      <!-- ============================ 错误 ============================ -->
       <section id="panel-error" class="panel error-panel hidden">
-        <h2>无法处理</h2>
-        <p id="error-message"></p>
+        <h2>无法继续</h2>
+        <pre id="error-message"></pre>
         <button type="button" class="btn btn-primary" id="btn-error-reset">返回</button>
       </section>
     </main>
 
     <footer class="footer">
-      <p>普通模式：本地 OCR + 免费公共翻译，不使用大模型 Key。复杂模式：仅调用你自己填写的 API。</p>
+      <p>
+        本地 OCR 模式下，图片和文字都不离开本机（仅翻译文本会发往所选翻译源）。
+        云端识别模式下，图片会发往你配置的视觉模型服务商。
+        API Key 只保存在你自己的浏览器里。
+      </p>
+      <p class="tiny">灵感来自 <a href="https://github.com/DonutShinobu/ShinobuTranslator" target="_blank" rel="noreferrer">ShinobuTranslator</a> 的「识别 → 翻译 → 嵌字」思路。</p>
     </footer>
   </div>
 
-  <script src="js/translator.js"></script>
+  <!-- 加载顺序有依赖：util ← 其它所有；config ← 算法层；overlay 依赖 util -->
+  <script src="js/util.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/imageproc.js"></script>
+  <script src="js/detect.js"></script>
+  <script src="js/overlay.js"></script>
+  <script src="js/ocr-local.js"></script>
+  <script src="js/vision.js"></script>
+  <script src="js/translate.js"></script>
   <script src="js/pdf-engine.js"></script>
-  <script src="js/image-engine.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
