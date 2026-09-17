@@ -36,6 +36,7 @@
     translateEngineField: $("#translate-engine-field"),
     cover: $("#opt-cover"),
     eraseMode: $("#opt-erase-mode"),
+    fontGrow: $("#opt-font-grow"),
     preserveCodes: $("#opt-preserve-codes"),
     fieldColors: $("#opt-field-colors"),
 
@@ -201,6 +202,19 @@
 
   function getTranslateEngine() {
     return els.translateEngine.value || "free";
+  }
+
+  /**
+   * 中文字号放大系数。
+   *
+   * 用户的原话："字还可以再大一点，我说中文一定比英文字数少。"
+   * 下拉框给四档，默认「更大」= 1.35；选了非法值就回落到配置默认值，
+   * 不让一个空字符串把字号算成 NaN。
+   */
+  function getFontGrow() {
+    const v = parseFloat(els.fontGrow && els.fontGrow.value);
+    if (!isFinite(v) || v <= 0) return C.LIMITS.overlayFontGrow;
+    return Math.min(3, Math.max(0.5, v));
   }
 
   function selectedValue(select, customInput) {
@@ -583,6 +597,7 @@
     store("target_lang", els.targetLang.value);
     store("cover", els.cover.checked ? "1" : "0");
     store("erase_mode", els.eraseMode.value);
+    store("font_grow", els.fontGrow.value);
     store("preserve", els.preserveCodes.checked ? "1" : "0");
     store("field_colors", els.fieldColors.checked ? "1" : "0");
     store("vision_provider", els.visionProvider.value);
@@ -696,6 +711,37 @@
    * 流水线：PDF
    * ============================================================ */
 
+  /**
+   * 排版 + 去字的公共参数。
+   *
+   * PDF 与图片两条流水线原来各抄了一份，抄漏过东西（一次是 PDF 漏传了
+   * 字段配色）。集中成一处，新增参数只需要改这里。
+   */
+  function overlayOpts(ctx) {
+    return {
+      cover: ctx.cover,
+      fieldColors: ctx.fieldColors,
+      maxGrowY: C.LIMITS.overlayMaxGrowY,
+      minFontSize: C.LIMITS.overlayMinFontSize,
+      minReadableSize: C.LIMITS.overlayMinReadableSize,
+      // 中文字号放大系数（用户可调，见「中文字号」下拉框）
+      fontGrow: getFontGrow(),
+      // 去字
+      eraseMode: ctx.eraseMode,
+      eraseRingWidth: C.LIMITS.eraseRingWidth,
+      eraseInkThreshold: C.LIMITS.eraseInkThreshold,
+      eraseInkThresholdFlat: C.LIMITS.eraseInkThresholdFlat,
+      eraseInkThresholdMid: C.LIMITS.eraseInkThresholdMid,
+      eraseHaloGrow: C.LIMITS.eraseHaloGrow,
+      eraseHaloDelta: C.LIMITS.eraseHaloDelta,
+      eraseResidualDelta: C.LIMITS.eraseResidualDelta,
+      eraseLineFillRatio: C.LIMITS.eraseLineFillRatio,
+      eraseLineMaxThickness: C.LIMITS.eraseLineMaxThickness,
+      signal: ctx.signal,
+      onLog: ctx.log,
+    };
+  }
+
   async function processPdfFile(file, ctx) {
     const buffer = await file.arrayBuffer();
     const doc = await window.PZPdf.loadDocument(buffer);
@@ -767,17 +813,7 @@
       ctx.step("compose");
       ctx.progress("compose", (no - 1) / doc.numPages);
       const rendered = await window.PZPdf.renderPage(ex.page, scale);
-      const composed = OV.render(rendered, items, {
-        cover: ctx.cover,
-        maxGrowY: C.LIMITS.overlayMaxGrowY,
-        minFontSize: C.LIMITS.overlayMinFontSize,
-      minReadableSize: C.LIMITS.overlayMinReadableSize,
-      eraseMode: ctx.eraseMode,
-      eraseRingWidth: C.LIMITS.eraseRingWidth,
-      eraseInkThreshold: C.LIMITS.eraseInkThreshold,
-        signal: ctx.signal,
-        onLog: ctx.log,
-      });
+      const composed = OV.render(rendered, items, overlayOpts(ctx));
 
       pages.push({
         original: rendered,
@@ -1074,18 +1110,7 @@
 
     // ---------- 排版 ----------
     ctx.step("compose");
-    const composed = OV.render(canvas, dd.items, {
-      cover: ctx.cover,
-      maxGrowY: C.LIMITS.overlayMaxGrowY,
-      minFontSize: C.LIMITS.overlayMinFontSize,
-      minReadableSize: C.LIMITS.overlayMinReadableSize,
-      eraseMode: ctx.eraseMode,
-      eraseRingWidth: C.LIMITS.eraseRingWidth,
-      eraseInkThreshold: C.LIMITS.eraseInkThreshold,
-      fieldColors: ctx.fieldColors,
-      signal: ctx.signal,
-      onLog: ctx.log,
-    });
+    const composed = OV.render(canvas, dd.items, overlayOpts(ctx));
 
     // 纯色填充的前提是"文字压在纯色底上"。底色不纯时它会留下一块看得见的色块，
     // 这时要明确告诉用户换个方式，而不是默默交出一张有痕迹的图。
@@ -1094,6 +1119,14 @@
       warnings.push(
         "有 " + ost.lowCoverage + " 处文字压在图案/渐变上，纯色填充在那里会留下一块色块。" +
           "这类图可以把「去字方式」切到「智能修复」再试。"
+      );
+    }
+    // 擦完仍有残墨：说明这些块的底色不够纯，或者字色和底色太接近，
+    // 自动阈值不敢再往下压。告诉用户是哪些块，而不是假装干净。
+    if (ost && ost.residualBlocks) {
+      ctx.log(
+        "⚠ 有 " + ost.residualBlocks + " 处擦除后仍有残墨（残墨像素合计 " +
+          (ost.eraseResidual || 0) + "），多半是底色不纯或字色接近底色"
       );
     }
 
@@ -1532,6 +1565,7 @@
     els.targetLang.addEventListener("change", savePrefs);
     els.cover.addEventListener("change", savePrefs);
     els.eraseMode.addEventListener("change", savePrefs);
+    els.fontGrow.addEventListener("change", savePrefs);
     els.preserveCodes.addEventListener("change", savePrefs);
     els.fieldColors.addEventListener("change", savePrefs);
 
@@ -1623,6 +1657,8 @@
     els.targetLang.value = restore("target_lang", "zh-CN");
     els.cover.checked = restore("cover", "1") === "1";
     els.eraseMode.value = restore("erase_mode", "ink");
+    // 中文字号默认「更大」：中文比英文短，框里有余量就放大一点（用户要求）
+    els.fontGrow.value = restore("font_grow", String(C.LIMITS.overlayFontGrow));
     els.preserveCodes.checked = restore("preserve", "1") === "1";
     // 字段配色默认关闭：它会改变原文档观感，不该默认生效
     els.fieldColors.checked = restore("field_colors", "0") === "1";

@@ -22,6 +22,18 @@
     '"Microsoft YaHei","PingFang SC","Noto Sans SC","Source Han Sans SC",' +
     '"Hiragino Sans GB",SimHei,sans-serif';
 
+  /**
+   * 中文字号相对原文墨迹高度的放大系数（默认值）。
+   *
+   * 用户的原话："字还可以再大一点，我说中文一定比英文字数少，你把英文的字体大一点"。
+   * 两个事实支撑这个默认值：
+   *  · measureInk 量的是**墨迹高度**，西文大约只有字号的 0.7 倍，照搬就已经小一圈；
+   *  · 中文比英文短，框内横向有余量。
+   * 1.35 大致让中文的 em 尺寸回到原文英文的字号水平。
+   * 界面上可以调（跟随原文 / 稍大 / 更大 / 最大）。
+   */
+  const DEFAULT_FONT_GROW = 1.35;
+
   /** 全角标点，不允许出现在行首 */
   const NO_LINE_START = "，。、；：？！）》」』】…—·%";
   /** 不允许出现在行尾 */
@@ -121,6 +133,16 @@
     // 起始字号按原文行高来（原文行高就是最可靠的"这里的字本来多大"信号）
     let start = Math.floor(h * fillRatio);
     if (opts.maxFontSize) start = Math.min(start, opts.maxFontSize);
+    // startAtMax：直接从**上限**起排。
+    //
+    // 为什么需要这个开关：`h` 是原文的墨迹高度，而西文的墨迹高度只有字号
+    // 的 ~0.7 倍（cap height）。照 `h × 0.92` 起排，中文会被压到英文的 0.65 倍，
+    // 视觉上明显小一圈 —— 用户反馈"字还可以再大一点，中文一定比英文字数少"。
+    // 中文短，横向本来就富余，所以**从上限往下试**才是对的：
+    // 装不下时这个函数自己会沿阶梯降字号，不会撑破。
+    if (opts.startAtMax && opts.maxFontSize && isFinite(opts.maxFontSize)) {
+      start = Math.floor(opts.maxFontSize);
+    }
     if (start < minFont) start = minFont;
 
     // 生成递减的字号阶梯，避免浮点下取整导致死循环
@@ -899,6 +921,9 @@
       erasedByFill: 0,
       erasedByRepair: 0,
       erasePixels: 0,
+      eraseProtected: 0,
+      eraseResidual: 0,
+      residualBlocks: 0,
       lowCoverage: 0,
       lowInkYield: 0,
       failed: 0,
@@ -969,20 +994,25 @@
           : { x: it.x, y: it.y, w: it.w, h: it.h };
 
         // 字号上限：
-        //  · 正常情况下**不超过原文的单行高** —— 这是之前修"字体太大"定下的规矩；
-        //  · 但原文本身很小的时候（8~9px 的标注），照搬就成了看不清的小字，
-        //    用户反馈"有的字还是太小了"。所以给一个可读下限：允许放到
-        //    max(原文单行高, 可读下限)。中文普通比英文短，框内往往有余量，
-        //    排版函数会在宽高约束内尽量取大，取不到也不会硬撑。
+        //  · 基准是原文的**单行墨迹高度**（不是字号 —— 西文的墨迹高度只有字号的
+        //    ~0.7 倍，直接照搬就已经让中文小了一圈）；
+        //  · 再乘一个放大系数 fontGrow。用户的判断很直接：中文一定比英文字数少，
+        //    框内横向有余量，凭什么不能比英文大？所以允许超过原文。
+        //    装不下时 layoutText 会自己降字号，宽高都受 allowW/allowH 约束，
+        //    不会回到"字体太大、对不齐"那一版（那是**没有**邻居约束时才出的问题）。
+        //  · 原文本身很小时（8~9px 的标注）另给一个可读下限。
         const readableFloor = opts.minReadableSize == null ? 11 : opts.minReadableSize;
+        const fontGrow = opts.fontGrow > 0 ? opts.fontGrow : DEFAULT_FONT_GROW;
         let sizeCap = opts.maxFontSize || Infinity;
         if (ink && ink.lineHeight > 0) {
-          sizeCap = Math.min(sizeCap, Math.max(ink.lineHeight, readableFloor));
+          sizeCap = Math.min(sizeCap, Math.max(ink.lineHeight * fontGrow, readableFloor));
         }
 
         const laid = layoutText(measure, String(it.dst), textBox, {
           minFontSize: minFontSize,
           maxFontSize: sizeCap,
+          // 从上限往下试：中文短，先试大的
+          startAtMax: true,
           allowTop: lim.top,
           allowBottom: lim.bottom,
           allowH: lim.allowH,
@@ -1058,6 +1088,15 @@
             ringWidth: opts.eraseRingWidth,
             contrast: opts.inkContrast,
             inkThreshold: opts.eraseInkThreshold,
+            inkThresholdFlat: opts.eraseInkThresholdFlat,
+            inkThresholdMid: opts.eraseInkThresholdMid,
+            haloGrow: opts.eraseHaloGrow,
+            haloDelta: opts.eraseHaloDelta,
+            residualDelta: opts.eraseResidualDelta,
+            lineFillRatio: opts.eraseLineFillRatio,
+            lineMaxThickness: opts.eraseLineMaxThickness,
+            // 原文的单行高 —— inpaint 用它判断"比字大得多的大块"（插画）该保护
+            glyphHeight: ink ? ink.lineHeight : 0,
             dilate: opts.inpaintDilate,
             minMaskRatio: opts.inpaintMinMaskRatio,
             fillColor: opts.eraseFillColor,
@@ -1071,6 +1110,12 @@
               // 擦掉的像素太少：说明这块里没找到"与背景色不同的字"，
               // 要么背景色认错了，要么字色和底色太接近 —— 记下来提醒
               if ((inp.ratio || 0) < 0.002) stats.lowInkYield++;
+              // 结构带（表格线/边框）被保护下来的行/列数与残墨量。
+              // 「去除不完整」靠这两个数字定位：残墨多 = 阈值还是偏保守；
+              // 结构带多 = 这块压在表格线上。
+              stats.eraseProtected += (inp.protectedRows || 0) + (inp.protectedCols || 0);
+              stats.eraseResidual += inp.residual || 0;
+              if ((inp.residualRatio || 0) > 0.02) stats.residualBlocks++;
             } else if (inp.mode === "fill") {
               stats.erasedByFill++;
               // 底色不纯（压在图案/渐变上）时整块填充会是一块看得见的色块

@@ -964,6 +964,7 @@ console.log("\n[8] 去字：文字掩膜 + 无缝修复");
       imageSmoothingEnabled: true,
       imageSmoothingQuality: "",
       _clip: null,
+      _texts: [],
 
       getImageData: function (x, y, w, h) {
         const out = new Uint8ClampedArray(Math.max(0, w * h * 4));
@@ -1023,7 +1024,10 @@ console.log("\n[8] 去字：文字掩膜 + 无缝修复");
       },
 
       // 文字不真的渲染：这一节测的是"去字"，不是"写字"
-      fillText: function () {},
+      // 但把字号记下来 —— 「中文字号能不能比原文大」只能靠这个来断言
+      fillText: function (s, x, y) {
+        ctx._texts.push({ text: String(s), font: ctx.font, x: x, y: y });
+      },
 
       measureText: function (s) {
         const m = /(\d+(?:\.\d+)?)px/.exec(ctx.font);
@@ -1395,6 +1399,154 @@ console.log("\n[8] 去字：文字掩膜 + 无缝修复");
     );
   }
 
+  // ---------- 结构带：细线保护、厚块不保护（修复"整行没擦"） ----------
+  {
+    const w = 40;
+    const h = 30;
+    const bin = new Uint8Array(w * h);
+    // 第 4~5 行：满行、只有 2px 厚 → 表格线
+    for (let y = 4; y <= 5; y++) for (let x = 0; x < w; x++) bin[y * w + x] = 1;
+    // 第 12~22 行：满行但 11px 厚 → 这是"糊成一团的字被连成一片"，不是线
+    for (let y = 12; y <= 22; y++) for (let x = 0; x < w; x++) bin[y * w + x] = 1;
+    // x=10~11 列：满列、2px 宽 → 竖线
+    for (let x = 10; x <= 11; x++) for (let y = 0; y < h; y++) bin[y * w + x] = 1;
+
+    const bands = INK.findStructureBands(bin, w, h, {});
+    ok(
+      "结构带：2px 的横线被保护（表格线 / 下划线不能擦）",
+      bands.rows[4] === 1 && bands.rows[5] === 1,
+      "rows[4]=" + bands.rows[4] + " rows[5]=" + bands.rows[5]
+    );
+    ok(
+      "结构带：满行但 11px 厚的字块**不**被保护 —— 这一条修的就是「糊字整行没擦」",
+      bands.rows[12] === 0 && bands.rows[17] === 0 && bands.rows[22] === 0,
+      "rows[12]=" + bands.rows[12] + " rows[17]=" + bands.rows[17]
+    );
+    ok("结构带：2px 的竖线被保护", bands.cols[10] === 1 && bands.cols[11] === 1, "cols[10]=" + bands.cols[10]);
+    ok("结构带：普通列（只有零星墨迹）不保护", bands.cols[0] === 0);
+  }
+
+  // ---------- 阈值自适应：纯底上的浅灰残影必须被擦掉 ----------
+  {
+    const cv = makeSoftCanvas(W, H);
+    paint(cv, { x: 0, y: 0, w: W, h: H }, [255, 255, 255]);
+    // 浅灰"字"：与纯白的 RGB 距离 = √(3×25²) ≈ 43，正好卡在旧阈值 44 以内 ——
+    // 旧版会原样留下这层鬼影（"去除不完整"），新版按底色纯度把阈值降到 16。
+    paint(cv, { x: 40, y: 28, w: 9, h: 12 }, [230, 230, 230]);
+
+    const dst = makeSoftCanvas(W, H);
+    const r = INK.coverText(cv.getContext("2d"), dst.getContext("2d"), { x: 38, y: 26, w: 40, h: 16 }, { mode: "ink" });
+    const p = readPx(dst, 44, 34);
+    ok("ink：底色纯时阈值自动降下来，距离 43 的浅灰残影也被擦掉", p[0] > 250, "残留 " + p.join(",") + "（阈值 " + r.threshold + "）");
+    ok(
+      "ink：返回实际用的阈值与残墨量，便于定位「去除不完整」",
+      r.threshold === 16 && typeof r.residualRatio === "number",
+      JSON.stringify({ threshold: r.threshold, residualRatio: r.residualRatio })
+    );
+  }
+
+  // ---------- 糊成一片的字要擦干净，同一块里的细表格线要留下 ----------
+  {
+    const cv = makeSoftCanvas(W, H);
+    paint(cv, { x: 0, y: 0, w: W, h: H }, [255, 255, 255]);
+    // 一条 2px 表格线（细 → 保护）
+    paint(cv, { x: 20, y: 27, w: 120, h: 2 }, [0, 0, 0]);
+    // 一整行字糊成 13px 厚、贯穿整块的长条（厚 → 必须当字擦掉）
+    paint(cv, { x: 20, y: 30, w: 120, h: 13 }, [60, 60, 60]);
+
+    const item = { x: 20, y: 26, w: 120, h: 18, src: "LONG BLURRED TEXT ROW", dst: "糊掉的长文字行" };
+    const out = globalThis.PZOverlay.render(cv, [item], { cover: true, eraseMode: "ink", minFontSize: 6 });
+    const lum = function (c) {
+      return (c[0] + c[1] + c[2]) / 3;
+    };
+    ok(
+      "糊成一片的字（13px 厚、横跨整块）被擦干净 —— 不再被误当成表格线放过",
+      lum(readPx(out, 80, 36)) > 250,
+      "字块中段亮度 " + lum(readPx(out, 80, 36)).toFixed(0)
+    );
+    ok("同一块里的细表格线仍然保留", lum(readPx(out, 80, 27)) < 60, "线亮度 " + lum(readPx(out, 80, 27)).toFixed(0));
+  }
+
+  // ---------- 保护大块（插画）但不能把"一整行字"也保护掉 ----------
+  {
+    // 又宽又大的文字连通块（一整行糊成一条）**不能**被当成插画保护
+    const cv = makeSoftCanvas(W, H);
+    paint(cv, { x: 0, y: 0, w: W, h: H }, [255, 255, 255]);
+    // 一条 20×12 的长条横跨整块 —— 面积 240，远大于老版面积判据的阈值
+    paint(cv, { x: 20, y: 30, w: 260, h: 12 }, [40, 40, 40]);
+    const dst1 = makeSoftCanvas(W, H);
+    const r1 = INK.coverText(cv.getContext("2d"), dst1.getContext("2d"), { x: 18, y: 28, w: 264, h: 16 }, {
+      mode: "ink",
+      glyphHeight: 12,
+    });
+    ok(
+      "大块保护：宽大的**文字**连通块不会被误判成插画（只看高度、不看面积）",
+      r1.erased > 3000,
+      "擦除 " + r1.erased + " px，保护大块 " + r1.protectedBlobs
+    );
+    ok("大块保护：这条文字确实被擦成底色", readPx(dst1, 150, 36)[0] > 250, "像素 " + readPx(dst1, 150, 36).join(","));
+
+    // 高得多的块（插画）必须保护下来，否则会在图里挖个白洞
+    const cv2 = makeSoftCanvas(W, H);
+    paint(cv2, { x: 0, y: 0, w: W, h: H }, [255, 255, 255]);
+    paint(cv2, { x: 40, y: 20, w: 120, h: 70 }, [200, 90, 60]); // 70px 高的大色块
+    const dst2 = makeSoftCanvas(W, H);
+    const r2 = INK.coverText(cv2.getContext("2d"), dst2.getContext("2d"), { x: 38, y: 18, w: 124, h: 74 }, {
+      mode: "ink",
+      glyphHeight: 12,
+    });
+    const keep = readPx(dst2, 100, 55);
+    ok(
+      "大块保护：比 4 行字还高的色块（插画）被保护，不会被涂成底色",
+      r2.protectedBlobs >= 1 && keep[0] > 150 && keep[1] < 130 && keep[2] < 110,
+      "保护大块 " + r2.protectedBlobs + "，色块像素 " + keep.join(",")
+    );
+  }
+
+  // ---------- 中文字号：允许比原文大 ----------
+  {
+    // 造一个"真实的框"：英文墨迹只占框内约 28% 的像素
+    // （占太多会让 measureInk 的中位背景色判反 —— 那是另一个话题，别混进这条测试）
+    const renderFont = function (grow) {
+      const cv = makeSoftCanvas(W, H);
+      paint(cv, { x: 0, y: 0, w: W, h: H }, [255, 255, 255]);
+      // 四个字形，墨迹外接框 = 36×11 → 单行墨迹高度 11px
+      for (let i = 0; i < 4; i++) paint(cv, { x: 42 + i * 10, y: 29, w: 6, h: 11 }, [0, 0, 0]);
+      const item = { x: 40, y: 26, w: 60, h: 16, src: "MATERIAL", dst: "材质" };
+      const opts = { cover: true, eraseMode: "ink", minFontSize: 6, minReadableSize: 11 };
+      if (grow != null) opts.fontGrow = grow;
+      const out = globalThis.PZOverlay.render(cv, [item], opts);
+      const t = out.getContext("2d")._texts[0];
+      return t ? parseFloat(/(\d+(?:\.\d+)?)px/.exec(t.font)[1]) : 0;
+    };
+
+    const base = renderFont(1);
+    const grown = renderFont(1.35);
+    ok("字号：跟随原文时 ≈ 墨迹高度（11px）", base >= 10 && base <= 12, "字号 " + base);
+    ok(
+      "字号：放大系数 1.35 时中文明显更大（中文比英文字数少，框里有余量）",
+      grown > base,
+      "跟随原文 " + base + "px → 更大 " + grown + "px"
+    );
+    ok("字号：仍然受上限约束，不会失控", grown <= Math.ceil(11 * 1.35) + 1, "字号 " + grown + "，上限 " + 11 * 1.35);
+
+    // 装不下时必须缩回去（放大不是硬撑）
+    const measure = function (s, fs) {
+      return String(s).length * fs;
+    };
+    const narrow = globalThis.PZOverlay.layoutText(
+      measure,
+      "很长很长的一段中文说明文字",
+      { x: 0, y: 0, w: 40, h: 12 },
+      { minFontSize: 6, maxFontSize: 30, startAtMax: true, allowH: 13 }
+    );
+    ok(
+      "字号：从上限起排、装不下时自己降下来（不会撑破框）",
+      narrow.fontSize < 30 && narrow.blockH <= 13.01,
+      "字号 " + narrow.fontSize + "，块高 " + narrow.blockH.toFixed(1)
+    );
+  }
+
   U.setCanvasFactory(null);
 }
 
@@ -1564,10 +1716,11 @@ console.log("\n[9] 实测框内几何（字号 / 对齐的依据）");
         Math.abs(texts[0].x - 35) < 1.5,
         "实际 x=" + texts[0].x
       );
-      // 字号上限 = max(原文单行高, 可读下限)：原文只有 8px 时允许放到可读下限 11，
-      // 但仍然远小于"整块墨迹高 22" —— 之前"字号算得过大"的错误没有回来
+      // 字号上限 = max(原文单行高 × 放大系数, 可读下限)：原文只有 8px 时
+      // 允许放到可读下限 11，但仍然远小于"整块墨迹高 22"
+      // —— 之前"字号算得过大"的错误没有回来
       ok(
-        "render 字号不超过 max(单行高 8, 可读下限 11)",
+        "render 字号不超过 max(单行高 8 × 1.35, 可读下限 11)",
         texts[0].fs <= 11.5 && texts[0].fs >= 8,
         "实际字号=" + texts[0].fs
       );

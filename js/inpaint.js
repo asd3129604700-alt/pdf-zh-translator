@@ -554,6 +554,75 @@
   }
 
   /**
+   * 找出"结构带"：整行（或整列）几乎铺满墨迹、而且**很薄**的连续带。
+   *
+   * 这是表格线、边框、下划线的形状特征，也是 ink 模式唯一要保护的东西。
+   *
+   * 为什么不再用"连通块是否跨到两条对边"：
+   * 那一版在**字糊成一团**的图上会把整整一行文字连成一个跨边的连通块，
+   * 于是被判成"表格线"、**整行一个字都没擦** ——
+   * 这正是用户说的"有的去除不完整"。
+   * 表格线真正的决定性特征是**薄**：一行字再糊也有 8~14px 厚，
+   * 一条线（含边框）通常 1~4px，所以把"厚度 ≤ maxThick"作为硬条件。
+   *
+   * 用"整行/整列"而不是"连通块"还有一个好处：文字和线条粘在一起时
+   * （字压着表格线、或字贴着边框），线条那一行照样被保护，字照样被擦掉。
+   *
+   * bin: Uint8Array(w*h) 的墨迹掩膜
+   * 返回 { rows: Uint8Array(h), cols: Uint8Array(w) }
+   */
+  function findStructureBands(bin, w, h, opts) {
+    opts = opts || {};
+    const minFill = opts.minFill == null ? 0.85 : opts.minFill;
+    const maxThick = opts.maxThick == null ? 6 : opts.maxThick;
+    // 保护面积上限：一条带最多占整块的多少（按长度算）
+    const maxShare = opts.maxShare == null ? 0.4 : opts.maxShare;
+
+    const flags = new Uint8Array(h);
+    for (let y = 0; y < h; y++) {
+      let c = 0;
+      const base = y * w;
+      for (let x = 0; x < w; x++) if (bin[base + x]) c++;
+      if (c >= w * minFill) flags[y] = 1;
+    }
+    const rows = new Uint8Array(h);
+    markThinRuns(flags, rows, maxThick, Math.max(1, Math.round(h * maxShare)));
+
+    flags.fill(0);
+    for (let x = 0; x < w; x++) {
+      let c = 0;
+      for (let y = 0; y < h; y++) if (bin[y * w + x]) c++;
+      if (c >= h * minFill) flags[x] = 1;
+    }
+    const cols = new Uint8Array(w);
+    markThinRuns(flags, cols, maxThick, Math.max(1, Math.round(w * maxShare)));
+
+    return { rows: rows, cols: cols };
+  }
+
+  /** 把 flags 里长度 ≤ maxThick 的连续段标进 out（总长度不超过 maxTotal） */
+  function markThinRuns(flags, out, maxThick, maxTotal) {
+    let start = -1;
+    let total = 0;
+    for (let i = 0; i <= flags.length; i++) {
+      const on = i < flags.length && flags[i];
+      if (on) {
+        if (start < 0) start = i;
+        continue;
+      }
+      if (start >= 0) {
+        const len = i - start;
+        if (len <= maxThick && total + len <= maxTotal) {
+          for (let k = start; k < i; k++) out[k] = 1;
+          total += len;
+        }
+        start = -1;
+      }
+    }
+    return total;
+  }
+
+  /**
    * 采集矩形**外侧一环**的像素（不含矩形内部）。
    * 内外一起读一次，比多次 getImageData 便宜。
    */
@@ -666,74 +735,187 @@
     // 背景色既然能识别出来，就不用整块刷 —— 只动那些与背景色**不同**的像素。
     // 于是底色、图案、表格线全都原样不动，中文背后**不会有任何一块贴纸**。
     //
-    // 相比 repair（掩膜 + 扩散）：这里不需要"哪些连通块是线条/图案"的判断，
-    // 因为判据就是"与背景色不同"，文字必然满足、纯色背景必然不满足，
-    // 少了一层会判错的启发式 —— 之前"擦完还有残留"就是栽在那层判断上。
+    // 判据是"与背景色的距离"，所以成败全在阈值和结构保护这两件事上：
+    //  1) 阈值**自适应**：环上主色占比越高（底色越纯），越敢把阈值压低。
+    //     纯底上压低阈值几乎没有代价 —— 那些像素本来就和底色差不多，
+    //     涂成底色看不出区别；但它能把字边缘一圈浅灰（抗锯齿/JPEG 振铃）吃掉，
+    //     修掉"去除不完整 / 留一层鬼影"。
+    //  2) 结构保护改用"薄带"判据（findStructureBands）。上一版是"连通块跨到
+    //     两条对边就保护"，在糊成一片的图上会把整行文字保护成"表格线"，
+    //     结果那一行**完全没擦**。
+    //  3) 灰边扩散：从掩膜出发，只要邻居"还不是纯底色"就再吃出去 1~2 圈。
     if (mode === "ink") {
       const d = img.data;
       const iw = img.width;
       const n = innerW * innerH;
-      const thr = opts.inkThreshold == null ? 44 : opts.inkThreshold;
-      const thr2 = thr * thr;
+      const fr = fillColor[0];
+      const fg = fillColor[1];
+      const fb = fillColor[2];
 
-      const bin = new Uint8Array(n);
-      let inkN = 0;
+      // ---- 1) 每个像素到背景主色的距离 ----
+      const dist = new Uint16Array(n);
       for (let y = 0; y < innerH; y++) {
         for (let x = 0; x < innerW; x++) {
           const o = ((inner.y + y) * iw + (inner.x + x)) * 4;
-          const dr = d[o] - fillColor[0];
-          const dg = d[o + 1] - fillColor[1];
-          const db = d[o + 2] - fillColor[2];
-          if (dr * dr + dg * dg + db * db > thr2) {
-            bin[y * innerW + x] = 1;
-            inkN++;
-          }
+          const dr = d[o] - fr;
+          const dg = d[o + 1] - fg;
+          const db = d[o + 2] - fb;
+          dist[y * innerW + x] = Math.round(Math.sqrt(dr * dr + dg * dg + db * db));
         }
       }
 
-      // 横穿/纵穿整块的连通域是表格线、边框这类背景结构，不能擦。
-      // 判据用"是否同时贴到两条相对的边"，比宽高比更稳：
-      // 一行密排的小字也可能很宽，但它不会同时贴住左右边界。
-      const keep = new Uint8Array(n);
-      eachComponent(bin, innerW, innerH, function (c) {
-        const spansX = c.x0 <= 0 && c.x1 >= innerW - 1;
-        const spansY = c.y0 <= 0 && c.y1 >= innerH - 1;
-        if (spansX || spansY) return;
-        for (let k = 0; k < c.pixels.length; k++) keep[c.pixels[k]] = 1;
-      });
+      // ---- 2) 阈值自适应 ----
+      const busyThr = opts.inkThreshold == null ? 44 : opts.inkThreshold;
+      const flatThr = Math.min(busyThr, opts.inkThresholdFlat == null ? 16 : opts.inkThresholdFlat);
+      const midThr = Math.min(busyThr, opts.inkThresholdMid == null ? 30 : opts.inkThresholdMid);
+      const cov = dom.coverage || 0;
+      const thr = cov >= 0.8 ? flatThr : cov >= 0.55 ? midThr : busyThr;
 
-      // 膨胀 1px：抗锯齿最外圈的颜色可能刚好卡在阈值内，不扩一圈会留灰边
-      const grown = keep.slice();
+      const bin = new Uint8Array(n);
+      let inkN = 0;
+      for (let i = 0; i < n; i++) {
+        if (dist[i] > thr) {
+          bin[i] = 1;
+          inkN++;
+        }
+      }
+
+      // ---- 3) 保护结构带（表格线 / 边框 / 下划线）----
+      const bands = findStructureBands(bin, innerW, innerH, {
+        minFill: opts.lineFillRatio,
+        maxThick: opts.lineMaxThickness,
+      });
+      let protectedRows = 0;
+      for (let i = 0; i < innerH; i++) if (bands.rows[i]) protectedRows++;
+      let protectedCols = 0;
+      for (let i = 0; i < innerW; i++) if (bands.cols[i]) protectedCols++;
+
+      // ---- 3b) 保护"明显不是字"的大块 ----
+      //
+      // 为什么必须有这一层：擦除范围是上游给的框，而框里**不保证只有字**
+      // —— 实测一张装饰图，检测框里就套着整片插画（483×380、894×309）。
+      // 判据只认"与底色不同"的话，插画会被整个涂成底色（等于在图里挖个白洞）。
+      // 沿用 buildMask 里那套已经验证过的字形尺度判据：
+      // 先取连通块高度的中位数当"字有多大"，再挑出比字大得多的块。
+      const comps = [];
+      eachComponent(bin, innerW, innerH, function (c) {
+        comps.push(c);
+      });
+      // "字有多大"的参照物：优先用调用方给的原文单行高（PZOverlay 已经量过，
+      // 那是最可靠的），拿不到才退回"连通块高度的中位数"。
+      //
+      // ⚠ 为什么不能只用中位数：块里只有一坨插画时，中位数就是那坨插画本身，
+      // 于是"比字大得多"这个判据永远不成立，插画照样被涂掉。
+      let glyphHeight = opts.glyphHeight > 0 ? opts.glyphHeight : 0;
+      if (!glyphHeight) {
+        const hs = comps
+          .map(function (c) {
+            return c.h;
+          })
+          .sort(function (a, b) {
+            return a - b;
+          });
+        glyphHeight = hs.length ? hs[hs.length >> 1] : 0;
+      }
+      // 阈值比 buildMask 松一档：宁可漏保护一两个大块，也别把"糊成一团的多行字"
+      // 当成插画保护下来（那正是用户说的"整块没擦"）。
+      const blobH = Math.max(18, glyphHeight * (opts.blobHeightFactor || 4) + 8);
+
+      // 逐像素保护掩膜：结构带（整行/整列）+ 大块
+      const protect = new Uint8Array(n);
+      for (let y = 0; y < innerH; y++) {
+        if (!bands.rows[y]) continue;
+        for (let x = 0; x < innerW; x++) protect[y * innerW + x] = 1;
+      }
+      for (let x = 0; x < innerW; x++) {
+        if (!bands.cols[x]) continue;
+        for (let y = 0; y < innerH; y++) protect[y * innerW + x] = 1;
+      }
+      let protectedBlobs = 0;
+      for (let i = 0; i < comps.length; i++) {
+        const c = comps[i];
+        // 细带已经保护过了，不要重复计数
+        if (bands.rows[c.y0] && bands.rows[c.y1]) continue;
+        // 判据只看**高度**，而且要求"比 4 行字还高"。
+        //
+        // 为什么不看面积：一行密排、糊成一条的文字连通块又宽又大，
+        // 面积判据会把整行字保护下来 —— 那就绕回了"整行没擦"的老毛病
+        // （实测一张装饰图，170×12 的文字行就栽在这上面）。
+        // 只看高度的话，"一行字"永远等于一个行高，不可能被判成大块。
+        if (c.h > blobH) {
+          protectedBlobs++;
+          const pxs = c.pixels;
+          for (let k = 0; k < pxs.length; k++) protect[pxs[k]] = 1;
+        }
+      }
+
+      const erase = new Uint8Array(n);
+      let erased = 0;
       for (let y = 0; y < innerH; y++) {
         for (let x = 0; x < innerW; x++) {
           const p = y * innerW + x;
-          if (keep[p]) continue;
-          let hit = 0;
-          for (let dy = -1; dy <= 1 && !hit; dy++) {
-            const ny = y + dy;
-            if (ny < 0 || ny >= innerH) continue;
-            for (let dx = -1; dx <= 1; dx++) {
-              const nx = x + dx;
-              if (nx < 0 || nx >= innerW) continue;
-              if (keep[ny * innerW + nx]) {
-                hit = 1;
-                break;
-              }
-            }
-          }
-          if (hit) grown[p] = 1;
+          if (!bin[p] || protect[p]) continue;
+          erase[p] = 1;
+          erased++;
         }
       }
 
-      let erased = 0;
+      // ---- 4) 灰边扩散 ----
+      // 只沿着"还不是纯底色"的像素往外走，走固定圈数（默认 2）。
+      // 不判模糊度、不做自适应迭代：圈数一多就会啃到图案上去。
+      const haloGrow = opts.haloGrow == null ? 2 : opts.haloGrow;
+      const haloDelta = Math.max(
+        opts.haloDelta == null ? 14 : opts.haloDelta,
+        Math.round(thr * 0.4)
+      );
+      let grown = erase;
+      for (let step = 0; step < haloGrow; step++) {
+        const next = grown.slice();
+        let added = 0;
+        for (let y = 0; y < innerH; y++) {
+          for (let x = 0; x < innerW; x++) {
+            const p = y * innerW + x;
+            if (grown[p] || protect[p]) continue;
+            if (dist[p] <= haloDelta) continue;
+            if (
+              (x > 0 && grown[p - 1]) ||
+              (x < innerW - 1 && grown[p + 1]) ||
+              (y > 0 && grown[p - innerW]) ||
+              (y < innerH - 1 && grown[p + innerW])
+            ) {
+              next[p] = 1;
+              added++;
+            }
+          }
+        }
+        grown = next;
+        if (!added) break;
+      }
+
+      // ---- 5) 涂成背景色 ----
+      let painted = 0;
       for (let y = 0; y < innerH; y++) {
         for (let x = 0; x < innerW; x++) {
           if (!grown[y * innerW + x]) continue;
           const o = ((inner.y + y) * iw + (inner.x + x)) * 4;
-          d[o] = fillColor[0];
-          d[o + 1] = fillColor[1];
-          d[o + 2] = fillColor[2];
-          erased++;
+          d[o] = fr;
+          d[o + 1] = fg;
+          d[o + 2] = fb;
+          painted++;
+        }
+      }
+
+      // ---- 6) 残墨统计 ----
+      // 擦完还剩多少"明显不是底色"的像素（被保护的线条/插画不算）。这个数字是
+      // 「去除不完整」唯一的客观依据 —— 之前那次翻车就是因为拿"边缘脏不脏"
+      // 当指标，而擦掉表格线恰好能让那个数字变好看。
+      const resDelta = opts.residualDelta == null ? 22 : opts.residualDelta;
+      let residual = 0;
+      for (let y = 0; y < innerH; y++) {
+        for (let x = 0; x < innerW; x++) {
+          const p = y * innerW + x;
+          if (grown[p] || protect[p]) continue;
+          if (dist[p] > resDelta) residual++;
         }
       }
 
@@ -744,11 +926,19 @@
         fill: fillColor,
         coverage: dom.coverage,
         unique: dom.unique,
+        threshold: thr,
         inkCount: inkN,
         // 擦掉的像素占整块的比例。太小说明"这块里没有找到与背景色不同的字"
         // （可能背景色认错了，或者字色与底色太接近），调用方应据此提醒。
         ratio: erased / n,
-        erased: erased,
+        // 含灰边扩散后真正被涂掉的像素数
+        erased: painted,
+        residual: residual,
+        residualRatio: residual / n,
+        protectedRows: protectedRows,
+        protectedCols: protectedCols,
+        protectedBlobs: protectedBlobs,
+        glyphHeight: glyphHeight,
         innerW: innerW,
         innerH: innerH,
       };
@@ -787,5 +977,9 @@
     collectRing: collectRing,
     eachComponent: eachComponent,
     luminanceOf: luminanceOf,
+    // 结构保护是纯逻辑，导出便于单测（"细带才算表格线"这条判据必须锁住：
+    // 它一旦退回"跨边就保护"，糊字整行不擦的老问题就会回来）
+    findStructureBands: findStructureBands,
+    markThinRuns: markThinRuns,
   };
 })(typeof window !== "undefined" ? window : globalThis);
