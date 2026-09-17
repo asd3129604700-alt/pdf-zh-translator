@@ -1501,6 +1501,23 @@ console.log("\n[8] 去字：文字掩膜 + 无缝修复");
       r2.protectedBlobs >= 1 && keep[0] > 150 && keep[1] < 130 && keep[2] < 110,
       "保护大块 " + r2.protectedBlobs + "，色块像素 " + keep.join(",")
     );
+
+    // 只画到单元格边、**不跨整块**的表格线也要保住（行/列判据覆盖不到它）
+    const cv3 = makeSoftCanvas(W, H);
+    paint(cv3, { x: 0, y: 0, w: W, h: H }, [255, 255, 255]);
+    paint(cv3, { x: 30, y: 24, w: 90, h: 2 }, [0, 0, 0]); // 90px 长、2px 厚的短线
+    paint(cv3, { x: 30, y: 34, w: 60, h: 12 }, [40, 40, 40]); // 一行字
+    const dst3 = makeSoftCanvas(W, H);
+    const r3 = INK.coverText(cv3.getContext("2d"), dst3.getContext("2d"), { x: 20, y: 20, w: 240, h: 40 }, {
+      mode: "ink",
+      glyphHeight: 12,
+    });
+    ok(
+      "短线保护：不跨整块、又细又实心的线也算表格线，保住",
+      r3.protectedStrips >= 1 && readPx(dst3, 70, 25)[0] < 60,
+      "保护短线 " + r3.protectedStrips + "，线像素 " + readPx(dst3, 70, 25).join(",")
+    );
+    ok("短线保护：同一块里的文字照样被擦掉", readPx(dst3, 60, 40)[0] > 250, "字像素 " + readPx(dst3, 60, 40).join(","));
   }
 
   // ---------- 中文字号：允许比原文大 ----------

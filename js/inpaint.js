@@ -832,6 +832,15 @@
         for (let y = 0; y < innerH; y++) protect[y * innerW + x] = 1;
       }
       let protectedBlobs = 0;
+      let protectedStrips = 0;
+      // 又细又长又实心的连通块也是线（不跨整块的那种：表格线只画到单元格边，
+      // 或者一条下划线）。字形不可能是这个形状 —— 再小的字也有 8px 高。
+      //
+      // 卡得很死是有意的：形如"一行小字糊成一条"的连通块也是又长又实心，
+      // 区别只在**厚度和实心度**（一行的厚度至少一个行高，实心度也远不到 0.85）。
+      // 宁可漏保护一条粗边框，也不能把一行小字保护下来 —— 那正是用户的抱怨。
+      const minStripLen = Math.max(24, glyphHeight * 3);
+      const maxStripThick = Math.min(4, Math.max(2, opts.lineMaxThickness || 6));
       for (let i = 0; i < comps.length; i++) {
         const c = comps[i];
         // 细带已经保护过了，不要重复计数
@@ -844,6 +853,15 @@
         // 只看高度的话，"一行字"永远等于一个行高，不可能被判成大块。
         if (c.h > blobH) {
           protectedBlobs++;
+          const pxs = c.pixels;
+          for (let k = 0; k < pxs.length; k++) protect[pxs[k]] = 1;
+          continue;
+        }
+        const fill = c.area / Math.max(1, c.w * c.h);
+        const horizontal = c.h <= maxStripThick && c.w >= minStripLen && fill >= 0.85;
+        const vertical = c.w <= maxStripThick && c.h >= minStripLen && fill >= 0.85;
+        if (horizontal || vertical) {
+          protectedStrips++;
           const pxs = c.pixels;
           for (let k = 0; k < pxs.length; k++) protect[pxs[k]] = 1;
         }
@@ -938,6 +956,7 @@
         protectedRows: protectedRows,
         protectedCols: protectedCols,
         protectedBlobs: protectedBlobs,
+        protectedStrips: protectedStrips,
         glyphHeight: glyphHeight,
         innerW: innerW,
         innerH: innerH,
