@@ -774,6 +774,7 @@
       minReadableSize: C.LIMITS.overlayMinReadableSize,
       eraseMode: ctx.eraseMode,
       eraseRingWidth: C.LIMITS.eraseRingWidth,
+      eraseInkThreshold: C.LIMITS.eraseInkThreshold,
         signal: ctx.signal,
         onLog: ctx.log,
       });
@@ -1080,6 +1081,7 @@
       minReadableSize: C.LIMITS.overlayMinReadableSize,
       eraseMode: ctx.eraseMode,
       eraseRingWidth: C.LIMITS.eraseRingWidth,
+      eraseInkThreshold: C.LIMITS.eraseInkThreshold,
       fieldColors: ctx.fieldColors,
       signal: ctx.signal,
       onLog: ctx.log,
@@ -1156,7 +1158,7 @@
       recognizeOnly: recognizeOnly,
       targetLang: els.targetLang.value,
       cover: els.cover.checked,
-      eraseMode: els.eraseMode.value || "fill",
+      eraseMode: els.eraseMode.value || "ink",
       fieldColors: els.fieldColors.checked,
       glossary: glossaryEntries(),
       hint: profileHint(),
@@ -1620,7 +1622,7 @@
     els.translateEngine.value = restore("translate_engine", "free");
     els.targetLang.value = restore("target_lang", "zh-CN");
     els.cover.checked = restore("cover", "1") === "1";
-    els.eraseMode.value = restore("erase_mode", "fill");
+    els.eraseMode.value = restore("erase_mode", "ink");
     els.preserveCodes.checked = restore("preserve", "1") === "1";
     // 字段配色默认关闭：它会改变原文档观感，不该默认生效
     els.fieldColors.checked = restore("field_colors", "0") === "1";

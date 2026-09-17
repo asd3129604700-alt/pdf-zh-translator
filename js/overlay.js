@@ -895,9 +895,12 @@
       inpainted: 0,
       inpaintPixels: 0,
       inpaintFallback: 0,
+      erasedByInk: 0,
       erasedByFill: 0,
       erasedByRepair: 0,
+      erasePixels: 0,
       lowCoverage: 0,
+      lowInkYield: 0,
       failed: 0,
       ms: 0,
     };
@@ -1042,17 +1045,19 @@
         // 字色/底色深浅从**原图**采样（这张画布已经被涂改过，读它会串味）
         const bg = sampleBackground(srcCtx, cover, canvas.width, canvas.height);
 
-        // 去字：
-        //  · fill   —— 采背景主色，把整块实心填掉。**保证零残留**，
-        //               文字压在纯色底上时看不出痕迹（用户点名要这个）
-        //  · repair —— 只擦文字像素再用扩散补回去，背景有图案/渐变时更自然，
-        //               但依赖掩膜判断，判错会留残留
+        // 去字，三种方式（见 PZInpaint.coverText）：
+        //  · ink    —— 只把"和背景色不同的像素"涂成背景色。底色、图案、线条都不动，
+        //              中文背后不会出现一块贴纸。**默认**
+        //  · fill   —— 整块实心填充。底色纯时最省事，但不纯时会留一块色块。
+        //  · repair —— 文字掩膜 + 无缝扩散修复。背景有渐变/纹理时更自然，
+        //              但依赖掩膜判断，判错会留残留。
         let coverOk = false;
         if (global.PZInpaint && opts.inpaint !== false) {
           const inp = global.PZInpaint.coverText(srcCtx, ctx, cover, {
             mode: opts.eraseMode,
             ringWidth: opts.eraseRingWidth,
             contrast: opts.inkContrast,
+            inkThreshold: opts.eraseInkThreshold,
             dilate: opts.inpaintDilate,
             minMaskRatio: opts.inpaintMinMaskRatio,
             fillColor: opts.eraseFillColor,
@@ -1060,14 +1065,19 @@
           coverOk = !!inp.ok;
           if (coverOk) {
             stats.inpainted++;
-            if (inp.mode === "fill") {
+            if (inp.mode === "ink") {
+              stats.erasedByInk++;
+              stats.erasePixels += inp.erased || 0;
+              // 擦掉的像素太少：说明这块里没找到"与背景色不同的字"，
+              // 要么背景色认错了，要么字色和底色太接近 —— 记下来提醒
+              if ((inp.ratio || 0) < 0.002) stats.lowInkYield++;
+            } else if (inp.mode === "fill") {
               stats.erasedByFill++;
-              // 底色不纯（压在图案/渐变上）时纯色填充会是一块看得见的色块，
-              // 记下来报给用户，而不是默默交出一张有痕迹的图
+              // 底色不纯（压在图案/渐变上）时整块填充会是一块看得见的色块
               if (inp.coverage < 0.7) stats.lowCoverage++;
             } else {
               stats.erasedByRepair++;
-              stats.inpaintPixels += inp.maskCount || 0;
+              stats.erasePixels += inp.maskCount || 0;
             }
           } else {
             stats.inpaintFallback++;

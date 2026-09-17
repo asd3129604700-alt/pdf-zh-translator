@@ -1296,6 +1296,105 @@ console.log("\n[8] 去字：文字掩膜 + 无缝修复");
     ok("智能修复：原文被擦掉（不再是黑）", l > 60, "亮度 " + l.toFixed(0));
   }
 
+  // ---------- 只擦文字（ink）：底色一点不动，不能有"贴纸" ----------
+  {
+    const cv = makeSoftCanvas(W, H);
+    // 彩色底（模拟玩偶图案区）+ 黑字压在上面
+    paint(cv, { x: 0, y: 0, w: W, h: H }, [238, 238, 238]);
+    paint(cv, { x: 26, y: 18, w: 70, h: 36 }, [200, 80, 60]); // 图案色块
+    paint(cv, { x: 40, y: 28, w: 9, h: 12 }, [0, 0, 0]); // 字
+    paint(cv, { x: 53, y: 28, w: 9, h: 12 }, [0, 0, 0]);
+    paint(cv, { x: 66, y: 28, w: 9, h: 12 }, [0, 0, 0]);
+
+    const before = cv._buf.slice();
+    let coverRect = null;
+    const item = { x: 38, y: 26, w: 40, h: 16, src: "LABEL", dst: "标签" };
+    const out = globalThis.PZOverlay.render(cv, [item], {
+      cover: true,
+      eraseMode: "ink",
+      minFontSize: 6,
+      onCover: function (cov) {
+        coverRect = cov;
+      },
+    });
+
+    ok("只擦文字：走的是 ink 路径", out._overlayStats.erasedByInk === 1, JSON.stringify(out._overlayStats));
+
+    // 逐像素比对覆盖区域：
+    //   · 变成"别的颜色"（既不是原色也不是背景色）—— 一个都不该有
+    //   · 变了的像素 —— 应当只占少数（只有文字本身）
+    //   · 没变的像素 —— 应当是绝大多数（底色/图案原样保留）
+    const panel = [200, 80, 60];
+    const near = function (c, t, tol) {
+      return Math.abs(c[0] - t[0]) <= tol && Math.abs(c[1] - t[1]) <= tol && Math.abs(c[2] - t[2]) <= tol;
+    };
+    const x0 = Math.round(coverRect.x);
+    const y0 = Math.round(coverRect.y);
+    const rectArea = Math.round(coverRect.w) * Math.round(coverRect.h);
+    let changed = 0;
+    let changedToElse = 0;
+    let unchanged = 0;
+    for (let y = y0; y < y0 + Math.round(coverRect.h); y++) {
+      for (let x = x0; x < x0 + Math.round(coverRect.w); x++) {
+        const p = (y * W + x) * 4;
+        const o = before[p];
+        const o1 = before[p + 1];
+        const o2 = before[p + 2];
+        const n = out._buf[p];
+        const n1 = out._buf[p + 1];
+        const n2 = out._buf[p + 2];
+        if (o === n && o1 === n1 && o2 === n2) {
+          unchanged++;
+          continue;
+        }
+        changed++;
+        // 改完之后必须是"背景色"（这里的背景就是图案色）
+        if (!near([n, n1, n2], panel, 2)) changedToElse++;
+      }
+    }
+
+    ok(
+      "只擦文字：底色/图案像素**一个都没动**（没有整块填充，所以不会有贴纸感）",
+      changedToElse === 0,
+      "被改成非背景色的像素 " + changedToElse + " 个"
+    );
+    ok(
+      "只擦文字：没变的像素占绝大多数（底色原样保留）",
+      unchanged > rectArea * 0.5,
+      "未改动 " + unchanged + " / " + rectArea
+    );
+    ok(
+      "只擦文字：改动的只有文字那一小部分",
+      changed > 0 && changed < rectArea * 0.5,
+      "改动 " + changed + " / " + rectArea
+    );
+  }
+
+  // ---------- 只擦文字：横穿整块的表格线要保留 ----------
+  {
+    const cv = makeSoftCanvas(W, H);
+    paint(cv, { x: 0, y: 0, w: W, h: H }, [238, 238, 238]);
+    paint(cv, { x: 30, y: 20, w: 60, h: 30 }, [200, 80, 60]);
+    // 一条横线贯穿整个覆盖区域（模拟表格边框）
+    paint(cv, { x: 30, y: 24, w: 60, h: 2 }, [0, 0, 0]);
+    paint(cv, { x: 40, y: 34, w: 9, h: 12 }, [0, 0, 0]);
+    paint(cv, { x: 53, y: 34, w: 9, h: 12 }, [0, 0, 0]);
+
+    const item = { x: 38, y: 32, w: 40, h: 16, src: "LABEL", dst: "标签" };
+    const out = globalThis.PZOverlay.render(cv, [item], {
+      cover: true,
+      eraseMode: "ink",
+      minFontSize: 6,
+    });
+    const line = readPx(out, 60, 25);
+    const lum = (c) => (c[0] + c[1] + c[2]) / 3;
+    ok(
+      "只擦文字：横穿整块的表格线被保留（不因为它颜色与底色不同就被擦掉）",
+      lum(line) < 60,
+      "线亮度 " + lum(line).toFixed(0)
+    );
+  }
+
   U.setCanvasFactory(null);
 }
 

@@ -601,7 +601,7 @@
    */
   function coverText(srcCtx, dstCtx, rect, opts) {
     opts = opts || {};
-    const mode = opts.mode === "repair" ? "repair" : "fill";
+    const mode = opts.mode === "repair" ? "repair" : opts.mode === "fill" ? "fill" : "ink";
     const ring = opts.ringWidth == null ? 6 : opts.ringWidth;
     const W = srcCtx.canvas.width;
     const H = srcCtx.canvas.height;
@@ -655,6 +655,100 @@
         // 偏低说明这块压在图案/渐变上，纯色填充会是一块看得见的色块。
         coverage: dom.coverage,
         unique: dom.unique,
+        innerW: innerW,
+        innerH: innerH,
+      };
+    }
+
+    // ---------- ink：只把"和背景色不一样的像素"涂成背景色 ----------
+    //
+    // 这是用户点名的做法，也是三种里最贴合"把字擦掉"这个意图的：
+    // 背景色既然能识别出来，就不用整块刷 —— 只动那些与背景色**不同**的像素。
+    // 于是底色、图案、表格线全都原样不动，中文背后**不会有任何一块贴纸**。
+    //
+    // 相比 repair（掩膜 + 扩散）：这里不需要"哪些连通块是线条/图案"的判断，
+    // 因为判据就是"与背景色不同"，文字必然满足、纯色背景必然不满足，
+    // 少了一层会判错的启发式 —— 之前"擦完还有残留"就是栽在那层判断上。
+    if (mode === "ink") {
+      const d = img.data;
+      const iw = img.width;
+      const n = innerW * innerH;
+      const thr = opts.inkThreshold == null ? 44 : opts.inkThreshold;
+      const thr2 = thr * thr;
+
+      const bin = new Uint8Array(n);
+      let inkN = 0;
+      for (let y = 0; y < innerH; y++) {
+        for (let x = 0; x < innerW; x++) {
+          const o = ((inner.y + y) * iw + (inner.x + x)) * 4;
+          const dr = d[o] - fillColor[0];
+          const dg = d[o + 1] - fillColor[1];
+          const db = d[o + 2] - fillColor[2];
+          if (dr * dr + dg * dg + db * db > thr2) {
+            bin[y * innerW + x] = 1;
+            inkN++;
+          }
+        }
+      }
+
+      // 横穿/纵穿整块的连通域是表格线、边框这类背景结构，不能擦。
+      // 判据用"是否同时贴到两条相对的边"，比宽高比更稳：
+      // 一行密排的小字也可能很宽，但它不会同时贴住左右边界。
+      const keep = new Uint8Array(n);
+      eachComponent(bin, innerW, innerH, function (c) {
+        const spansX = c.x0 <= 0 && c.x1 >= innerW - 1;
+        const spansY = c.y0 <= 0 && c.y1 >= innerH - 1;
+        if (spansX || spansY) return;
+        for (let k = 0; k < c.pixels.length; k++) keep[c.pixels[k]] = 1;
+      });
+
+      // 膨胀 1px：抗锯齿最外圈的颜色可能刚好卡在阈值内，不扩一圈会留灰边
+      const grown = keep.slice();
+      for (let y = 0; y < innerH; y++) {
+        for (let x = 0; x < innerW; x++) {
+          const p = y * innerW + x;
+          if (keep[p]) continue;
+          let hit = 0;
+          for (let dy = -1; dy <= 1 && !hit; dy++) {
+            const ny = y + dy;
+            if (ny < 0 || ny >= innerH) continue;
+            for (let dx = -1; dx <= 1; dx++) {
+              const nx = x + dx;
+              if (nx < 0 || nx >= innerW) continue;
+              if (keep[ny * innerW + nx]) {
+                hit = 1;
+                break;
+              }
+            }
+          }
+          if (hit) grown[p] = 1;
+        }
+      }
+
+      let erased = 0;
+      for (let y = 0; y < innerH; y++) {
+        for (let x = 0; x < innerW; x++) {
+          if (!grown[y * innerW + x]) continue;
+          const o = ((inner.y + y) * iw + (inner.x + x)) * 4;
+          d[o] = fillColor[0];
+          d[o + 1] = fillColor[1];
+          d[o + 2] = fillColor[2];
+          erased++;
+        }
+      }
+
+      dstCtx.putImageData(img, ox0, oy0);
+      return {
+        ok: true,
+        mode: "ink",
+        fill: fillColor,
+        coverage: dom.coverage,
+        unique: dom.unique,
+        inkCount: inkN,
+        // 擦掉的像素占整块的比例。太小说明"这块里没有找到与背景色不同的字"
+        // （可能背景色认错了，或者字色与底色太接近），调用方应据此提醒。
+        ratio: erased / n,
+        erased: erased,
         innerW: innerW,
         innerH: innerH,
       };
