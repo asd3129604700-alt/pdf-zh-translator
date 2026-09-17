@@ -65,7 +65,7 @@ console.log("\n[1] app.js 依赖的跨模块接口");
 // 这张表是从 js/app.js 里实际出现的调用点整理出来的
 const REQUIRED = {
   PZUtil: ["createCanvas", "ctx2d", "clamp", "isAbortError", "abortError", "throwIfAborted", "pool", "cropCanvas", "cloneCanvas", "fmtDuration", "toRect"],
-  PZConfig: ["VERSION", "LIMITS", "VISION_PRESETS", "LLM_PRESETS", "PROFILES", "parseGlossary", "TARGET_LANGS"],
+  PZConfig: ["VERSION", "BUILD", "LIMITS", "VISION_PRESETS", "LLM_PRESETS", "PROFILES", "parseGlossary", "TARGET_LANGS"],
   PZOverlay: ["render", "measureInk", "layoutText", "computeNeighborLimits", "classifyField", "colorForItem"],
   PZInpaint: ["buildMask", "inpaint", "coverText"],
   PZDetect: ["detect"],
@@ -92,7 +92,7 @@ Object.keys(REQUIRED).forEach(function (mod) {
   // 是函数的必须是函数
   const notFn = REQUIRED[mod].filter(function (k) {
     // 常量类导出不需要是函数
-    if (["VERSION", "LIMITS", "VISION_PRESETS", "LLM_PRESETS", "PROFILES", "TARGET_LANGS", "FONT_STACK"].indexOf(k) >= 0) return false;
+    if (["VERSION", "BUILD", "LIMITS", "VISION_PRESETS", "LLM_PRESETS", "PROFILES", "TARGET_LANGS", "FONT_STACK"].indexOf(k) >= 0) return false;
     return typeof obj[k] !== "function";
   });
   ok(mod + " 的接口都是可调用的", notFn.length === 0, notFn.length ? "不是函数：" + notFn.join(", ") : "");

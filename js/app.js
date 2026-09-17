@@ -1612,8 +1612,8 @@
    * ============================================================ */
 
   function init() {
-    // 版本与降级提示
-    els.versionPill.textContent = "v" + (C.VERSION || "?");
+    // 版本与降级提示（构建号让用户一眼看出 F5 之后有没有拿到新版）
+    els.versionPill.textContent = "v" + (C.VERSION || "?") + (C.BUILD ? " · " + C.BUILD : "");
 
     // 引擎
     const savedEngine = restore("ocr_engine", "vision");

@@ -11,6 +11,9 @@
   "use strict";
 
   const VERSION = "3.0.0";
+  // 构建标记：每次改动都往上加，页面右上角会显示 "v3.0.0 · b12"。
+  // 用户只要按一次 F5 看到这个数字变了，就说明拿到的是新版。
+  const BUILD = "b12";
 
   /* ============================================================
    * 目标语言
@@ -543,6 +546,7 @@
 
   global.PZConfig = {
     VERSION: VERSION,
+    BUILD: BUILD,
     TARGET_LANGS: TARGET_LANGS,
     OCR_ENGINES: OCR_ENGINES,
     TRANSLATE_ENGINES: TRANSLATE_ENGINES,
