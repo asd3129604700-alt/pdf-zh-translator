@@ -1480,6 +1480,147 @@ console.log("\n[10] 排版质量与去重");
 }
 
 /* ============================================================
+ * 11. 端到端去重：同一处被识别两次时，中文只画一次
+ * ============================================================ */
+
+console.log("\n[11] 端到端去重（模拟视觉模型两遍返回同一处）");
+
+{
+  const U = globalThis.PZUtil;
+  const OV = globalThis.PZOverlay;
+
+  function inkCtx(W, H, rects) {
+    function isInk(x, y) {
+      for (let i = 0; i < rects.length; i++) {
+        const r = rects[i];
+        if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return true;
+      }
+      return false;
+    }
+    return {
+      getImageData: function (x, y, w, h) {
+        const data = new Uint8ClampedArray(Math.max(0, w * h * 4));
+        for (let yy = 0; yy < h; yy++) {
+          for (let xx = 0; xx < w; xx++) {
+            const o = (yy * w + xx) * 4;
+            const v = isInk(x + xx, y + yy) ? 0 : 255;
+            data[o] = v;
+            data[o + 1] = v;
+            data[o + 2] = v;
+            data[o + 3] = 255;
+          }
+        }
+        return { width: w, height: h, data: data };
+      },
+    };
+  }
+
+  const W = 400;
+  const H = 200;
+  // 原文墨迹在 (120,50)-(180,64)
+  const inkRects = [{ x: 120, y: 50, w: 60, h: 14 }];
+
+  function factory() {
+    const src = inkCtx(W, H, inkRects);
+    return function (w, h) {
+      const cv = { width: w, height: h, _c: null };
+      cv.getContext = function () {
+        if (!cv._c) {
+          const draws = [];
+          const texts = [];
+          cv._c = {
+            canvas: { width: w, height: h },
+            fills: draws,
+            texts: texts,
+            font: "",
+            fillStyle: "",
+            letterSpacing: "",
+            textAlign: "",
+            textBaseline: "",
+            imageSmoothingEnabled: true,
+            imageSmoothingQuality: "",
+            measureText: function (s) {
+              const m = /(\d+(?:\.\d+)?)px/.exec(cv._c.font);
+              const fs = m ? parseFloat(m[1]) : 10;
+              let wpx = 0;
+              for (const ch of String(s)) {
+                wpx += /[\u4e00-\u9fff\uff00-\uffef\u3000-\u303f]/.test(ch) ? fs : fs * 0.55;
+              }
+              return { width: wpx };
+            },
+            getImageData: src.getImageData,
+            createImageData: function (ww, hh) {
+              return { width: ww, height: hh, data: new Uint8ClampedArray(Math.max(0, ww * hh * 4)) };
+            },
+            fillRect: function (x, y, ww, hh) {
+              draws.push({ x: x, y: y, w: ww, h: hh });
+            },
+            fillText: function (t, x, y) {
+              texts.push({ t: String(t), x: x, y: y });
+            },
+            save: function () {},
+            restore: function () {},
+            beginPath: function () {},
+            rect: function () {},
+            clip: function () {},
+            clearRect: function () {},
+            putImageData: function () {},
+            drawImage: function () {},
+          };
+        }
+        return cv._c;
+      };
+      return cv;
+    };
+  }
+
+  // 模拟真实情形：同一处文字被"区域遍"和"整图遍"各返回一次，
+  // 位置差几像素，文本差一个字母（相似度掉到阈值以下，只靠文本比对会漏网）
+  const raw = [
+    { x: 114, y: 46, w: 72, h: 22, src: "Skirt", dst: "裙子" },
+    { x: 117, y: 48, w: 70, h: 21, src: "Skirf", dst: "裙子" },
+  ];
+  // 另一处完全不相干的文字，不能被误合并
+  const other = { x: 20, y: 140, w: 120, h: 20, src: "Colors", dst: "配色" };
+
+  globalThis.PZUtil.setCanvasFactory(factory());
+  const srcCanvas = U.createCanvas(W, H);
+
+  // ---- 修复前的行为：不去重，两条都画 ----
+  const before = OV.render(srcCanvas, raw.concat([other]), { cover: true, minFontSize: 6 });
+  const beforeTexts = before.getContext().texts.filter(function (t) {
+    return t.t === "裙子";
+  });
+  ok(
+    "对照：不去重时同一处会画两次（这就是「看起来翻译了两次」）",
+    beforeTexts.length === 2,
+    "画了 " + beforeTexts.length + " 次"
+  );
+
+  // ---- 修复后：先去重再画 ----
+  const dd = U.dedupeOverlappingItems(raw.concat([other]));
+  ok("去重后只剩 2 条（重复的那处合并掉，另一处保留）", dd.items.length === 2, "剩 " + dd.items.length);
+  ok("合并计数 = 1", dd.merged === 1, "merged=" + dd.merged);
+
+  const after = OV.render(srcCanvas, dd.items, { cover: true, minFontSize: 6 });
+  const afterTexts = after.getContext().texts.filter(function (t) {
+    return t.t === "裙子";
+  });
+  const otherTexts = after.getContext().texts.filter(function (t) {
+    return t.t === "配色";
+  });
+  ok("修复后同一处只画一次", afterTexts.length === 1, "画了 " + afterTexts.length + " 次");
+  ok("不相干的那处照常画", otherTexts.length === 1, "画了 " + otherTexts.length + " 次");
+  ok(
+    "覆盖补丁也只有一处（不会出现后一块盖掉前一块中文的情况）",
+    after.getContext().fills.length === 2,
+    "fills=" + after.getContext().fills.length
+  );
+
+  globalThis.PZUtil.setCanvasFactory(null);
+}
+
+/* ============================================================
  * 汇总
  * ============================================================ */
 
