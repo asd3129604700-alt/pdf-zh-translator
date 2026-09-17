@@ -306,6 +306,135 @@
   }
 
   /* ============================================================
+   * 实测框内的文字几何
+   *
+   * 为什么不能直接信传进来的框（下面这些数字是在真实客户图纸上量出来的）：
+   *
+   * 1. **框常常比文字宽**。某张 TO 图纸上，框宽/墨迹宽中位数 1.17，
+   *    最松的一个框左边留了 29px 空白。中文按框左边缘画就会整体左偏 29px
+   *    —— 这是"中文对不齐"的直接原因。
+   *
+   * 2. **框可能装着一整段而不只是一行**。视觉模型习惯把一段文字框成一块，
+   *    实测出现过 1308×450、906×165 这种框，里面是好幾行小字。
+   *    按框高定字号会算出 fontSize = 0.92 × 450 = 414px，
+   *    而那块里每行原文只有 30px —— 这是"字体太大"的直接原因。
+   *
+   * 所以先量出框内墨迹的外接框和**行数**，再用"单行高"定字号、
+   * 用"墨迹左边缘"定位。上游框给松还是给紧都不影响结果。
+   * ============================================================ */
+
+  /** 与背景亮度差多少算"墨" */
+  const INK_CONTRAST = 38;
+
+  function measureInk(ctx, box, canvasW, canvasH, opts) {
+    opts = opts || {};
+    const contrast = opts.contrast == null ? INK_CONTRAST : opts.contrast;
+    const x0 = U.clamp(Math.floor(box.x), 0, canvasW - 1);
+    const y0 = U.clamp(Math.floor(box.y), 0, canvasH - 1);
+    const x1 = U.clamp(Math.ceil(box.x + box.w), x0 + 1, canvasW);
+    const y1 = U.clamp(Math.ceil(box.y + box.h), y0 + 1, canvasH);
+    const w = x1 - x0;
+    const h = y1 - y0;
+    if (w < 3 || h < 3) return null;
+
+    let img;
+    try {
+      img = ctx.getImageData(x0, y0, w, h);
+    } catch (e) {
+      return null;
+    }
+    const d = img.data;
+    const n = w * h;
+    const lum = new Float32Array(n);
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) {
+      const o = i * 4;
+      const v = 0.299 * d[o] + 0.587 * d[o + 1] + 0.114 * d[o + 2];
+      lum[i] = v;
+      hist[v < 0 ? 0 : v > 255 ? 255 : v | 0]++;
+    }
+    // 背景亮度取中位数：文字只占少数像素，中位数一定落在背景上
+    let acc = 0;
+    let bgLum = 128;
+    const half = n / 2;
+    for (let v = 0; v < 256; v++) {
+      acc += hist[v];
+      if (acc >= half) {
+        bgLum = v;
+        break;
+      }
+    }
+
+    let ix0 = w;
+    let iy0 = h;
+    let ix1 = -1;
+    let iy1 = -1;
+    let inkCount = 0;
+    const rowCount = new Int32Array(h);
+    for (let y = 0; y < h; y++) {
+      let c = 0;
+      for (let x = 0; x < w; x++) {
+        if (Math.abs(lum[y * w + x] - bgLum) > contrast) {
+          c++;
+          if (x < ix0) ix0 = x;
+          if (x > ix1) ix1 = x;
+          if (y < iy0) iy0 = y;
+          if (y > iy1) iy1 = y;
+        }
+      }
+      rowCount[y] = c;
+      inkCount += c;
+    }
+    if (ix1 < 0) return null;
+
+    // 数行：在墨迹的纵向范围内找"连续的墨行带"
+    const bands = [];
+    let start = -1;
+    for (let y = iy0; y <= iy1 + 1; y++) {
+      const on = y <= iy1 && rowCount[y] > 0;
+      if (on && start < 0) {
+        start = y;
+      } else if (!on && start >= 0) {
+        if (y - start >= 2) bands.push(y - start);
+        start = -1;
+      }
+    }
+
+    const inkH = iy1 - iy0 + 1;
+    const inkW = ix1 - ix0 + 1;
+    let lineHeight = inkH;
+    let lineCount = 1;
+    if (bands.length > 1) {
+      // 用各行带高度的中位数当"单行高"：比 inkH/行数 稳，
+      // 不会被某一行带降部、或一行里的零星杂点带偏
+      const hs = bands.slice().sort(function (a, b) {
+        return a - b;
+      });
+      lineHeight = hs[hs.length >> 1];
+      lineCount = bands.length;
+    }
+
+    return {
+      // 全部是整图坐标
+      x: x0 + ix0,
+      y: y0 + iy0,
+      w: inkW,
+      h: inkH,
+      right: x0 + ix1,
+      bottom: y0 + iy1,
+      lineCount: lineCount,
+      lineHeight: lineHeight,
+      padLeft: ix0,
+      padTop: iy0,
+      inkDensity: inkCount / Math.max(1, inkW * inkH),
+      bgLum: bgLum,
+      bgIsDark: bgLum < 95,
+      boxW: w,
+      boxH: h,
+    };
+  }
+
+  /* ============================================================
    * 扩张覆盖范围直到"边缘干净"
    *
    * 这是"去字不干净、留下灰色残影"的主因。
@@ -709,10 +838,27 @@
       const lim = limits[i];
 
       try {
-        const textBox = { x: it.x, y: it.y, w: it.w, h: it.h };
+        // 先实测框内文字的真实几何（外接框 + 行数），不要直接信传进来的框。
+        // 上游的框可能比文字宽（→ 中文左偏），也可能装着一整段（→ 字号算得过大）。
+        const ink =
+          opts.measureInk === false
+            ? null
+            : measureInk(srcCtx, it, canvas.width, canvas.height, {
+                contrast: opts.inkContrast,
+              });
+
+        const textBox = ink
+          ? { x: ink.x, y: ink.y, w: ink.w, h: ink.h }
+          : { x: it.x, y: it.y, w: it.w, h: it.h };
+
         const laid = layoutText(measure, String(it.dst), textBox, {
           minFontSize: minFontSize,
-          maxFontSize: opts.maxFontSize,
+          // 字号上限用**实测的单行高**，而不是整块高：
+          // 一块 450px 高的框里如果是 5 行 30px 的小字，字号就该按 30px 走
+          maxFontSize:
+            ink && ink.lineHeight > 0
+              ? Math.min(opts.maxFontSize || Infinity, ink.lineHeight)
+              : opts.maxFontSize,
           allowTop: lim.top,
           allowBottom: lim.bottom,
           allowH: lim.allowH,
@@ -809,6 +955,7 @@
     medianColor: medianColor,
     isCJK: isCJK,
     // 去字干净程度相关的内部函数（单测要用）
+    measureInk: measureInk,
     growCoverUntilClean: growCoverUntilClean,
     sideDeviations: sideDeviations,
     stripDeviation: stripDeviation,

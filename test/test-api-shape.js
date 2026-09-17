@@ -265,7 +265,14 @@ ok("PDF 渲染倍率 ≥ 2（保证 144dpi 以上）", LIMITS.pdfRenderScale >= 
 ok("本地 OCR worker 数 ≥ 2（原实现是单 worker 串行）", LIMITS.ocrWorkers >= 2, "当前 " + LIMITS.ocrWorkers);
 ok("视觉模型并发 ≥ 2", LIMITS.visionConcurrency >= 2, "当前 " + LIMITS.visionConcurrency);
 ok("区域放大目标不小于 640px（小字才看得清）", LIMITS.regionCropMinSide >= 640, "当前 " + LIMITS.regionCropMinSide);
-ok("检测上限不超过 24 个区域（原实现是 64）", LIMITS.visionMaxRegions <= 24, "当前 " + LIMITS.visionMaxRegions);
+// 旧实现是固定 64 个区域块 + 3 次全图探测，纯粹是浪费；
+// 但也不能太小：大图纸分块检测之后区域会变多，上限太小会把页面下半部分整段截掉，
+// 那一整块就永远不会被翻译。
+ok(
+  "区域上限足够覆盖分块后的大图纸（旧实现是固定 64 块 + 3 次全图探测，纯浪费）",
+  LIMITS.visionMaxRegions <= 64 && LIMITS.visionMaxRegions >= 24,
+  "当前 " + LIMITS.visionMaxRegions
+);
 
 const vis = globalThis.PZConfig.VISION_PRESETS;
 ok(

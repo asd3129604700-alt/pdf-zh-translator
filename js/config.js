@@ -317,7 +317,12 @@
     regionCropPadRatio: 0.12, // 裁切时按区域尺寸外扩，避免切掉字
     visionImageMaxSide: 1800, // 整图兜底时传给模型的长边上限
     visionConcurrency: 4, // 并发请求数
-    visionMaxRegions: 24, // 实际送去逐块识别的区域上限
+    visionMaxRegions: 60,
+    // ↑ 逐块识别的区域上限，是「召回 vs 花费」的折中：每块一次 API 请求。
+    // 大图纸分块检测后区域数会到 50~100，上限太小就会按阅读顺序截断 ——
+    // 表现是**页面下半部分整段没翻**。这里定得偏大，因为漏字比多花几分钱难受得多。
+    // 如果哪天想省钱，调小这个值即可，其余逻辑不用动。
+    visionRegionWarnRatio: 0.9, // 区域数达到上限的这个比例就在日志里提醒
 
     // 本地 OCR
     ocrWorkers: 3, // Tesseract worker 数（并行）

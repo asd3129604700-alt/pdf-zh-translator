@@ -1081,6 +1081,182 @@ console.log("\n[8] 去字：覆盖范围自动扩张");
 }
 
 /* ============================================================
+ * 9. 实测框内几何（measureInk）—— 字号与对齐的依据
+ * ============================================================ */
+
+console.log("\n[9] 实测框内几何（字号 / 对齐的依据）");
+
+{
+  const OV = globalThis.PZOverlay;
+
+  function inkCtx(W, H, rects) {
+    function isInk(x, y) {
+      for (let i = 0; i < rects.length; i++) {
+        const r = rects[i];
+        if (x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) return true;
+      }
+      return false;
+    }
+    return {
+      getImageData: function (x, y, w, h) {
+        const data = new Uint8ClampedArray(Math.max(0, w * h * 4));
+        for (let yy = 0; yy < h; yy++) {
+          for (let xx = 0; xx < w; xx++) {
+            const o = (yy * w + xx) * 4;
+            const v = isInk(x + xx, y + yy) ? 0 : 255;
+            data[o] = v;
+            data[o + 1] = v;
+            data[o + 2] = v;
+            data[o + 3] = 255;
+          }
+        }
+        return { width: w, height: h, data: data };
+      },
+    };
+  }
+
+  // --- 单行：框比文字宽，墨迹左上留了空白 ---
+  {
+    const ctx = inkCtx(400, 300, [{ x: 35, y: 44, w: 60, h: 10 }]);
+    const m = OV.measureInk(ctx, { x: 20, y: 40, w: 100, h: 20 }, 400, 300, {});
+    ok(
+      "单行：量到墨迹外接框",
+      !!m && m.x === 35 && m.y === 44 && m.w === 60 && m.h === 10,
+      m ? JSON.stringify({ x: m.x, y: m.y, w: m.w, h: m.h }) : "null"
+    );
+    ok(
+      "单行：算出左边空白 = 15px（中文必须从这里起画，否则整体左偏）",
+      m && m.padLeft === 15,
+      m && m.padLeft
+    );
+    ok("单行：行数 = 1", m && m.lineCount === 1, m && m.lineCount);
+    ok("单行：单行高 = 墨迹高 = 10", m && m.lineHeight === 10, m && m.lineHeight);
+  }
+
+  // --- 多行块：框里装着两行小字（这是"字号算得过大"的根源） ---
+  {
+    const ctx = inkCtx(400, 300, [
+      { x: 35, y: 44, w: 60, h: 8 },
+      { x: 35, y: 58, w: 60, h: 8 },
+    ]);
+    const m = OV.measureInk(ctx, { x: 20, y: 40, w: 100, h: 30 }, 400, 300, {});
+    ok("多行块：识别出 2 行", m && m.lineCount === 2, m && m.lineCount);
+    ok(
+      "多行块：单行高 = 8（按这个定字号，而不是按整块墨迹高 22）",
+      m && m.lineHeight === 8,
+      m ? "lineHeight=" + m.lineHeight + "，整块墨迹高=" + m.h : "null"
+    );
+    ok("多行块：墨迹整体高 = 22", m && m.h === 22, m && m.h);
+  }
+
+  // --- 三行，行距不规则 ---
+  {
+    const ctx = inkCtx(400, 300, [
+      { x: 30, y: 30, w: 50, h: 10 },
+      { x: 30, y: 50, w: 50, h: 10 },
+      { x: 30, y: 80, w: 50, h: 10 },
+    ]);
+    const m = OV.measureInk(ctx, { x: 20, y: 20, w: 100, h: 80 }, 400, 300, {});
+    ok("三行不规则行距：仍识别出 3 行", m && m.lineCount === 3, m && m.lineCount);
+    ok("三行不规则行距：单行高取中位数 = 10", m && m.lineHeight === 10, m && m.lineHeight);
+  }
+
+  // --- 框里什么都没有 ---
+  {
+    const ctx = inkCtx(400, 300, []);
+    const m = OV.measureInk(ctx, { x: 20, y: 40, w: 100, h: 20 }, 400, 300, {});
+    ok("框内无墨迹时返回 null（调用方要能退回原框）", m === null, String(m));
+  }
+
+  // --- 端到端：render 必须按墨迹左边缘画、按单行高定字号 ---
+  {
+    function renderCtxFactory(W, H, rects) {
+      const src = inkCtx(W, H, rects);
+      return function (w, h) {
+        const cv = { width: w, height: h, _c: null };
+        cv.getContext = function () {
+          if (!cv._c) {
+            const draws = [];
+            const texts = [];
+            cv._c = {
+              canvas: { width: w, height: h },
+              fills: draws,
+              texts: texts,
+              font: "",
+              fillStyle: "",
+              textAlign: "",
+              textBaseline: "",
+              imageSmoothingEnabled: true,
+              imageSmoothingQuality: "",
+              measureText: function (s) {
+                const m2 = /(\d+(?:\.\d+)?)px/.exec(cv._c.font);
+                const fs = m2 ? parseFloat(m2[1]) : 10;
+                let wpx = 0;
+                for (const ch of String(s)) {
+                  wpx += /[\u4e00-\u9fff\uff00-\uffef\u3000-\u303f]/.test(ch) ? fs : fs * 0.55;
+                }
+                return { width: wpx };
+              },
+              getImageData: src.getImageData,
+              createImageData: function (ww, hh) {
+                return { width: ww, height: hh, data: new Uint8ClampedArray(Math.max(0, ww * hh * 4)) };
+              },
+              fillRect: function (x, y, ww, hh) {
+                draws.push({ x: x, y: y, w: ww, h: hh });
+              },
+              fillText: function (t, x, y) {
+                const m3 = /(\d+(?:\.\d+)?)px/.exec(cv._c.font);
+                texts.push({ t: String(t), x: x, y: y, fs: m3 ? parseFloat(m3[1]) : 0 });
+              },
+              save: function () {},
+              restore: function () {},
+              beginPath: function () {},
+              rect: function () {},
+              clip: function () {},
+              clearRect: function () {},
+              putImageData: function () {},
+              drawImage: function () {},
+            };
+          }
+          return cv._c;
+        };
+        return cv;
+      };
+    }
+
+    const W = 400;
+    const H = 300;
+    globalThis.PZUtil.setCanvasFactory(
+      renderCtxFactory(W, H, [
+        { x: 35, y: 44, w: 60, h: 8 },
+        { x: 35, y: 58, w: 60, h: 8 },
+      ])
+    );
+    const srcCanvas = globalThis.PZUtil.createCanvas(W, H);
+    const out = OV.render(srcCanvas, [{ x: 20, y: 40, w: 100, h: 30, src: "loose box", dst: "材质" }], {
+      cover: true,
+      maxGrowY: 1.6,
+      minFontSize: 6,
+    });
+    const texts = out.getContext().texts;
+    ok("render 写出了中文", texts.length >= 1, "texts=" + texts.length);
+    if (texts.length) {
+      ok(
+        "render 从墨迹左边缘（x=35）起画，而不是框左边缘（x=20）",
+        Math.abs(texts[0].x - 35) < 1.5,
+        "实际 x=" + texts[0].x
+      );
+      ok(
+        "render 字号按单行高（8）封顶，而不是按整块墨迹高（22）",
+        texts[0].fs <= 8.5,
+        "实际字号=" + texts[0].fs
+      );
+    }
+    globalThis.PZUtil.setCanvasFactory(null);
+  }
+}
+
+/* ============================================================
  * 汇总
  * ============================================================ */
 

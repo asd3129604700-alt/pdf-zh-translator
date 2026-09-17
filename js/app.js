@@ -786,6 +786,126 @@
    * ============================================================ */
 
   /**
+   * 文字区域检测（大图自动分块）。
+   *
+   * 为什么必须分块：`PZDetect` 会把图缩到长边 `detectMaxSide`（1600）再检测。
+   * 一张 5100px 的图纸缩到 1600 是 **0.31 倍** —— 原本 15px 的小标签变成 4.7px，
+   * 掉到最小行高以下就**直接漏检**，那一块永远不会被翻译；
+   * 而且整图兜底那遍缩得更狠，根本救不回来。
+   *
+   * 所以大图切成带重叠的块，每块单独检测（此时每块的有效分辨率接近原图），
+   * 再把坐标平移回整图、去重合并。小字就是这么保住的。
+   */
+  function detectText(canvas, log) {
+    const maxSide = C.LIMITS.detectMaxSide;
+    const W = canvas.width;
+    const H = canvas.height;
+
+    // 每块的目标边长略小于上限，给重叠留余地
+    const target = Math.round(maxSide * 0.86);
+    const cols = Math.max(1, Math.ceil(W / target));
+    const rows = Math.max(1, Math.ceil(H / target));
+
+    if (cols === 1 && rows === 1) {
+      const det = window.PZDetect.detect(canvas, { maxSide: maxSide });
+      det.stats = det.stats || {};
+      det.stats.tiles = 1;
+      return det;
+    }
+
+    const tileW = Math.ceil(W / cols);
+    const tileH = Math.ceil(H / rows);
+    // 重叠是为了不让正好压在两块交界上的文字被切掉
+    const overlap = Math.round(Math.min(tileW, tileH) * 0.12);
+
+    const allLines = [];
+    const allRegions = [];
+    let ms = 0;
+
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const x0 = Math.max(0, c * tileW - (c > 0 ? overlap : 0));
+        const y0 = Math.max(0, r * tileH - (r > 0 ? overlap : 0));
+        const x1 = Math.min(W, (c + 1) * tileW + (c < cols - 1 ? overlap : 0));
+        const y1 = Math.min(H, (r + 1) * tileH + (r < rows - 1 ? overlap : 0));
+        const tw = x1 - x0;
+        const th = y1 - y0;
+        if (tw < 32 || th < 32) continue;
+
+        const tile = U.cropCanvas(canvas, { x: x0, y: y0, w: tw, h: th }, { pad: 0, scale: 1 });
+        const det = window.PZDetect.detect(tile, { maxSide: maxSide });
+        ms += (det.stats && det.stats.ms) || 0;
+
+        for (let i = 0; i < det.lines.length; i++) {
+          const l = det.lines[i];
+          allLines.push({ x: l.x + x0, y: l.y + y0, w: l.w, h: l.h, fontHeight: l.h, conf: l.conf });
+        }
+        const regs = det.regions || [];
+        for (let i = 0; i < regs.length; i++) {
+          const g = regs[i];
+          allRegions.push({ x: g.x + x0, y: g.y + y0, w: g.w, h: g.h, score: g.score, lines: g.lines });
+        }
+      }
+    }
+
+    // 重叠区里同一行会被相邻两块各检一次，按重叠比例去重
+    const lines = [];
+    for (let i = 0; i < allLines.length; i++) {
+      const a = allLines[i];
+      let dup = false;
+      for (let j = 0; j < lines.length; j++) {
+        if (U.overlapRatio(lines[j], a) > 0.5) {
+          dup = true;
+          break;
+        }
+      }
+      if (!dup) lines.push(a);
+    }
+
+    const regions = [];
+    for (let i = 0; i < allRegions.length; i++) {
+      const a = allRegions[i];
+      let dup = false;
+      for (let j = 0; j < regions.length; j++) {
+        if (U.overlapRatio(regions[j], a) > 0.6) {
+          dup = true;
+          break;
+        }
+      }
+      if (!dup) regions.push(a);
+    }
+
+    // 按阅读顺序排（上到下、左到右）。下游会 `slice(0, maxRegions)` 截断，
+    // 不排序的话截出来的是"前几块"而不是"页面靠上那部分"，截断位置就没意义了。
+    const cmp = function (a, b) {
+      if (Math.abs(a.y - b.y) > Math.max(a.h, b.h) * 0.6) return a.y - b.y;
+      return a.x - b.x;
+    };
+    lines.sort(cmp);
+    regions.sort(cmp);
+
+    if (log) {
+      log("  大图分 " + cols + "×" + rows + " 块检测，得到 " + lines.length + " 行 / " + regions.length + " 区域");
+    }
+
+    return {
+      width: W,
+      height: H,
+      lines: lines,
+      regions: regions,
+      hasText: lines.length > 0,
+      stats: {
+        ms: ms,
+        tiles: cols * rows,
+        cols: cols,
+        rows: rows,
+        lines: lines.length,
+        regions: regions.length,
+      },
+    };
+  }
+
+  /**
    * 对一张画布做「识别 → 翻译 → 排版」，返回 {items, composed, warnings}。
    *
    * 图片和「没有文字层的 PDF 页面」共用这一段。后者会先把 PDF 页渲染成画布
@@ -801,6 +921,24 @@
     const useVision = wantVision && !!(ctx.vision && ctx.vision.apiKey);
     if (wantVision && !useVision) {
       ctx.log("  未配置视觉模型 Key，本页退回本地 OCR");
+    }
+
+    // 先做一次检测，两条路都要用：
+    //  · 视觉路径：把区域传下去做"区域放大识别"，比让视觉模块自己缩图检测强
+    //  · 本地路径：给 OCR 切条带用
+    ctx.step("detect");
+    const det = detectText(canvas, ctx.log);
+    ctx.log(
+      "  定位到 " + det.lines.length + " 行 / " + det.regions.length + " 区域（" +
+        (det.stats && det.stats.ms ? det.stats.ms + "ms" : "?") + "）"
+    );
+    if (!det.regions.length) ctx.log("  未定位到文字区域，将退化为整图识别");
+    // 区域被截断时必须说出来：表现是"页面某一段整块没翻"，不说的话用户只会以为是漏识别
+    if (det.regions.length >= C.LIMITS.visionMaxRegions * (C.LIMITS.visionRegionWarnRatio || 0.9)) {
+      ctx.log(
+        "  ！区域数（" + det.regions.length + "）接近上限 " + C.LIMITS.visionMaxRegions +
+          "，超出的部分只会走整图兜底，可能翻不全"
+      );
     }
 
     if (useVision) {
@@ -820,6 +958,9 @@
           signal: ctx.signal,
           concurrency: C.LIMITS.visionConcurrency,
           maxRegions: C.LIMITS.visionMaxRegions,
+          // 用上面分块检测的结果。视觉模块自己检测时会先把图缩到 1600，
+          // 大图纸上的小字就没了 —— 所以必须把区域显式传下去。
+          regions: det.regions.length ? det.regions : null,
           wholeImage: true,
           limits: C.LIMITS,
         },
@@ -854,16 +995,7 @@
       );
     } else {
       // ---------- 本地 OCR ----------
-      ctx.step("detect");
-      ctx.log("检测文字区域");
-      const det = window.PZDetect.detect(canvas, {
-        maxSide: C.LIMITS.detectMaxSide,
-      });
-      ctx.log(
-        "  找到 " + det.lines.length + " 行 / " + det.regions.length + " 个区域（" +
-          (det.stats && det.stats.ms ? det.stats.ms + "ms" : "?") + "）"
-      );
-
+      // 检测已经在上面做过了（分块），这里直接用它切条带
       ctx.step("recognize");
       const ocr = await window.PZOcr.recognize(
         canvas,
