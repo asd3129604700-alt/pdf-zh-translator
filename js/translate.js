@@ -5,7 +5,7 @@
  *
  * 1. 本文件里**不允许出现任何具体产品 / 角色 / 客户词汇**。所有领域词汇一律走
  *    `opts.glossaryEntries`（由 PZConfig.parseGlossary 从界面文本解析而来）。
- *    原实现把 25 条 Hololive / Duolingo 词表和「你是玩具/产品规格图译者」的提示词
+ *    原实现把二十多条客户专有词表和「你是某个行业的规格图译者」的提示词
  *    写死在代码里，用户换一份普通客户资料就会被带偏。
  *
  * 2. 提示词一律由 PZConfig.buildTranslateSystem / buildTranslateBatchUser 生成，

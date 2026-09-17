@@ -202,11 +202,32 @@ console.log("\n[4] 领域过拟合回归");
 
 // 原来这些词硬编码在 translator.js / image-engine.js 里，
 // 换一份普通客户资料就会被带偏。现在只允许出现在 config.js 的领域预设里。
-const DOMAIN_WORDS = ["hololive", "Takanashi", "Kiara", "Duolingo", "Buff Duo", "Jakks", "Calliope", "Ninomae"];
+//
+// ⚠ 具体的客户/品牌词**不写在这个文件里** —— 仓库是公开的。
+// 它们放在仓库外的 test/domain-words.local.txt（.gitignore 挡住了），
+// 有它就按它检查（本机跑测试时最严格），没有就退回下面这组通用占位词。
+const LOCAL_WORDS_FILE = path.join(__dirname, "domain-words.local.txt");
+let DOMAIN_WORDS = ["acme", "Acme", "Widgetco", "CHARACTER A", "CHARACTER B", "eduapp"];
+let localWordsUsed = false;
+if (fs.existsSync(LOCAL_WORDS_FILE)) {
+  const lines = fs
+    .readFileSync(LOCAL_WORDS_FILE, "utf8")
+    .split(/\r?\n/)
+    .map(function (l) {
+      return l.trim();
+    })
+    .filter(function (l) {
+      return l && l.charAt(0) !== "#";
+    });
+  if (lines.length) {
+    DOMAIN_WORDS = lines;
+    localWordsUsed = true;
+  }
+}
 
 /**
  * 去掉注释再检查。
- * 注释里提到历史（"原实现把 Hololive 词表写死在代码里"）是**应该**保留的说明，
+ * 注释里提到历史（"原实现把某个客户的词表写死在代码里"）是**应该**保留的说明，
  * 不能算违规；只有真正会被执行的字符串才算。
  */
 function stripComments(src) {
@@ -231,6 +252,11 @@ ok(
   "算法层模块的可执行代码里没有具体产品/角色词（只允许在 config.js 的领域预设里）",
   offenders.length === 0,
   offenders.length ? offenders.join("; ") : ""
+);
+console.log(
+  localWordsUsed
+    ? "  （黑名单来自 test/domain-words.local.txt，共 " + DOMAIN_WORDS.length + " 个客户词）"
+    : "  （本机没有 domain-words.local.txt，本次用的是通用占位词；放一份进去会让这条断言更严格）"
 );
 
 // 系统提示词里也不能写死领域
@@ -293,7 +319,7 @@ ok(
 const gitignore = fs.readFileSync(path.join(ROOT, ".gitignore"), "utf8");
 ok(
   ".gitignore 挡住了本机私有术语表 glossary.local.txt",
-  /^\s*glossary\.local\.txt\s*$/m.test(gitignore),
+  /^\s*glossary\.local\.txt\s*$/m.test(gitignore) || /^\s*\*\.local\.txt\s*$/m.test(gitignore),
   "缺这一行的话，私有词表会被误提交"
 );
 ok(

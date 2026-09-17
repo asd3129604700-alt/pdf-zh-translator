@@ -705,13 +705,28 @@ section("6. 提示词：必须来自 PZConfig，且无领域词硬编码");
 (function testPrompts() {
   // 领域词黑名单：这些词只允许从 profileHint / glossaryEntries 进来，
   // 绝不允许出现在 vision.js 拼出来的通用提示词里。
-  const DOMAIN_WORDS = [
-    "hololive", "Hololive", "HOLOLIVE",
+  //
+  // ⚠ 真实客户/品牌名不写在这里（仓库是公开的）：放在仓库外的
+  // test/domain-words.local.txt，有它就用它，没有就用下面这些占位名。
+  const LOCAL_WORDS_FILE = path.join(__dirname, "domain-words.local.txt");
+  let BRAND_WORDS = ["acme", "Acme", "ACME", "Widgetco", "CHARACTER A", "CHARACTER B", "eduapp"];
+  if (fs.existsSync(LOCAL_WORDS_FILE)) {
+    const lines = fs
+      .readFileSync(LOCAL_WORDS_FILE, "utf8")
+      .split(/\r?\n/)
+      .map(function (l) {
+        return l.trim();
+      })
+      .filter(function (l) {
+        return l && l.charAt(0) !== "#";
+      });
+    if (lines.length) BRAND_WORDS = lines;
+  }
+  const DOMAIN_WORDS = BRAND_WORDS.concat([
     "玩具", "毛绒", "角色", "刺绣", "贴布绣", "印花", "渐变", "材质规格",
     "规格图", "规格表", "产品规格",
-    "Jakks", "PANTONE", "PMS", "TAKANASHI", "KIARA",
-    "Duolingo", "plush",
-  ];
+    "PANTONE", "PMS", "plush",
+  ]);
 
   const plainRegion = C.buildRegionPrompt({ targetLang: "zh-CN" });
   const plainWhole = C.buildWholePrompt({ targetLang: "zh-CN" });
@@ -756,7 +771,7 @@ section("6. 提示词：必须来自 PZConfig，且无领域词硬编码");
 
   // vision.js 源码里不能出现领域词（真正的"防过拟合"回归断言）
   const src = fs.readFileSync(path.join(ROOT, "js", "vision.js"), "utf8");
-  ["hololive", "玩具", "毛绒", "规格图", "刺绣", "PANTONE", "TAKANASHI"].forEach(function (w) {
+  BRAND_WORDS.concat(["玩具", "毛绒", "规格图", "刺绣", "PANTONE"]).forEach(function (w) {
     check(src.indexOf(w) < 0, "vision.js 源码里没有领域词「" + w + "」");
   });
   // 反向确认：本测试文件的"领域词黑名单"本身是有内容的

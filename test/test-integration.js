@@ -431,7 +431,9 @@ console.log("\n[5] 配置层（PZConfig）");
     glossaryEntries: [],
     profileHint: "",
   });
-  const forbidden = ["hololive", "Takanashi", "Duolingo", "玩具", "规格图", "PMS", "EMBROIDERY"];
+  // 这些词只用来验证"领域词不会渗进通用提示词"。
+  // 用占位词而不是真实客户品牌名 —— 仓库是公开的，没必要把客户痕迹留在测试里。
+  const forbidden = ["ACME", "Geartron", "玩具", "规格图", "PMS", "EMBROIDERY"];
   const hits = forbidden.filter(function (w) {
     return generalPrompt.indexOf(w) >= 0;
   });
@@ -457,7 +459,7 @@ console.log("\n[5] 配置层（PZConfig）");
       "# 注释行应被忽略",
       "Torque => 扭矩",
       "SEPARATE PIECE => 独立部件",
-      "hololive => 原样",
+      "ACME => 原样",
       "PMS",
       "",
       "A -> B",
@@ -472,7 +474,7 @@ console.log("\n[5] 配置层（PZConfig）");
   ok("parseGlossary：支持 → 分隔", entries[5].from === "C" && entries[5].to === "D");
 
   const gp = C.glossaryToPrompt(entries);
-  ok("glossaryToPrompt：keep 项出现在「保持原样」段落", gp.indexOf("保持英文原样") >= 0 && gp.indexOf("hololive") >= 0);
+  ok("glossaryToPrompt：keep 项出现在「保持原样」段落", gp.indexOf("保持英文原样") >= 0 && gp.indexOf("ACME") >= 0);
   ok("glossaryToPrompt：映射项出现在对照段落", gp.indexOf("Torque => 扭矩") >= 0);
 
   // 预设完整性：每个预设必须有 baseUrl 和默认模型，否则用户点了就报错
