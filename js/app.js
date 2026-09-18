@@ -843,12 +843,26 @@
       ctx.step("compose");
       ctx.progress("compose", (no - 1) / doc.numPages);
       const rendered = await window.PZPdf.renderPage(ex.page, scale);
-      const composed = OV.render(rendered, items, overlayOpts(ctx));
+      // PDF 的文字层同样是按"文本片段"给的：一行里标签和数值常是两个片段，
+      // 分开排版会互相夹住空间 —— 和图片那条路是同一个问题，所以同样要合并。
+      const pd = U.dedupeOverlappingItems(items);
+      const pm = U.mergeAdjacentItems(pd.items, {
+        gapRatio: C.LIMITS.mergeGapRatio,
+        maxHeightRatio: C.LIMITS.mergeMaxHeightRatio,
+      });
+      if (pm.merged) {
+        ctx.log(
+          "  第 " + no + " 页把 " + pm.merged + " 处挨得近的片段并成了一条（" +
+            items.length + " → " + pm.items.length + " 条）"
+        );
+      }
+      const pd2 = U.dedupeOverlappingItems(pm.items);
+      const composed = OV.render(rendered, pd2.items, overlayOpts(ctx));
 
       pages.push({
         original: rendered,
         translated: composed,
-        items: items,
+        items: pd2.items,
         label: file.name + " · 第 " + no + " 页",
         pageSize: { wPt: ex.widthPt, hPt: ex.heightPt },
         stats: composed._overlayStats,
@@ -1138,9 +1152,28 @@
       ctx.log("  合并了 " + dd.merged + " 条重复识别（同一处被检出多次）");
     }
 
+    // ---------- 合并相邻的碎块 ----------
+    // 上游常把一整行切成好几块。碎块之间会互相夹住排版空间，
+    // 表现就是"贴不全 + 有的字小"，而孤立的块完全正常 —— 同一批里好坏不一。
+    // 详见 PZUtil.mergeAdjacentItems 的注释。
+    const mg = U.mergeAdjacentItems(dd.items, {
+      gapRatio: C.LIMITS.mergeGapRatio,
+      maxHeightRatio: C.LIMITS.mergeMaxHeightRatio,
+    });
+    if (mg.merged) {
+      ctx.log(
+        "  把 " + mg.merged + " 处挨得近的碎块并成了一条（" +
+          dd.items.length + " → " + mg.items.length + " 条），" +
+          "这样擦除范围不会被邻居夹住、字号也不会被挤小"
+      );
+    }
+    // 合并之后可能又出现了重叠（并出来的大框套住了别的条），再去一次重
+    const dd2 = U.dedupeOverlappingItems(mg.items);
+    if (dd2.merged) ctx.log("  再合并了 " + dd2.merged + " 条重复识别");
+
     // ---------- 排版 ----------
     ctx.step("compose");
-    const composed = OV.render(canvas, dd.items, overlayOpts(ctx));
+    const composed = OV.render(canvas, dd2.items, overlayOpts(ctx));
 
     // 纯色填充的前提是"文字压在纯色底上"。底色不纯时它会留下一块看得见的色块，
     // 这时要明确告诉用户换个方式，而不是默默交出一张有痕迹的图。
@@ -1160,7 +1193,7 @@
       );
     }
 
-    return { items: dd.items, composed: composed, warnings: warnings };
+    return { items: dd2.items, composed: composed, warnings: warnings };
   }
 
   async function processImageFile(file, ctx) {

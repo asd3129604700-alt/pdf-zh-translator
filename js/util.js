@@ -292,6 +292,121 @@
   }
 
   /* ============================================================
+   * 相邻文字块合并
+   * ============================================================ */
+
+  /**
+   * 把"同一行上挨得很近"的条目合并成一条。
+   *
+   * 用户反馈的原话："还是存在贴不全还有部分字小的问题，但是同一批有的是完全正常的…
+   * 是切太多块了吗，那要不要一个字附近有字就一起切，隔得很开才单独切"。
+   * 他说对了，而且这一个原因同时解释了三个症状：
+   *
+   * 上游（视觉模型 / OCR）经常把**一整行字切成好几块** —— 一个标签一块、
+   * 一个值一块，甚至一个词一块。之后排版阶段，每一块都要靠"邻居边界"约束自己：
+   *   · 擦除范围被左右邻居夹住 → 原文边缘擦不掉（**贴不全**）
+   *   · 可用横向空间被切成几份 → 字号被迫缩小（**字小**）
+   *   · 上下邻居同样会夹住可用高度 → 中文块放不下就再缩一档
+   * 而孤立的块没有邻居，拿到的是完整空间 ——
+   * 于是**同一批里有的完全正常、有的很糟**，看起来毫无规律。
+   *
+   * 三个判据必须同时成立才合并（宁可少合并，也不要跨表格列乱并）：
+   *   · 纵向重叠 ≥ 较矮那个的 55%   —— 确实在同一行
+   *   · 高度比 ≤ 1.8                —— 别把大标题和小标注并到一起
+   *   · 横向间距 ≤ 较矮那个的 1.2 倍 —— "挨得近"；表格列之间的空隙远大于此
+   *   · 横向间距 ≥ -0.35 倍          —— 大幅重叠的是重复识别，交给去重，不是相邻
+   *
+   * 合并后的坐标取并集；原文用空格连接（英文之间要空格），
+   * 译文按语言习惯连接（中文之间不加空格）。
+   *
+   * 返回 { items, merged }
+   */
+  function mergeAdjacentItems(items, opts) {
+    opts = opts || {};
+    const minOverlapY = opts.minOverlapY == null ? 0.55 : opts.minOverlapY;
+    const maxHeightRatio = opts.maxHeightRatio == null ? 1.8 : opts.maxHeightRatio;
+    const gapRatio = opts.gapRatio == null ? 1.2 : opts.gapRatio;
+    const minGapRatio = opts.minGapRatio == null ? -0.35 : opts.minGapRatio;
+    // 迭代到不再变化为止。合并出来的块可能和下一个块也够近，
+    // 所以要反复扫；上限是防御（每轮至少少一条，正常 2~3 轮就停）。
+    const maxPass = opts.maxPass == null ? 8 : opts.maxPass;
+
+    const list = (items || []).slice().sort(function (a, b) {
+      return a.y - b.y || a.x - b.x;
+    });
+    let merged = 0;
+
+    function joinSrc(a, b) {
+      const x = String(a == null ? "" : a).trim();
+      const y = String(b == null ? "" : b).trim();
+      if (!x) return y;
+      if (!y) return x;
+      return x + " " + y;
+    }
+
+    /** 译文拼接：两侧都是中文时直接连，否则补一个空格 */
+    function joinDst(a, b) {
+      const x = String(a == null ? "" : a);
+      const y = String(b == null ? "" : b);
+      if (!x) return y;
+      if (!y) return x;
+      if (/\s$/.test(x) || /^\s/.test(y)) return x + y;
+      const cjk = /[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff00-\uffef]/;
+      if (cjk.test(x.charAt(x.length - 1)) || cjk.test(y.charAt(0))) return x + y;
+      return x + " " + y;
+    }
+
+    for (let pass = 0; pass < maxPass; pass++) {
+      let changed = false;
+
+      outer: for (let i = 0; i < list.length; i++) {
+        for (let j = i + 1; j < list.length; j++) {
+          const a = list[i];
+          const b = list[j];
+          const minH = Math.max(1, Math.min(a.h, b.h));
+          const maxH = Math.max(a.h, b.h);
+          if (maxH / minH > maxHeightRatio) continue;
+
+          // 纵向重叠（同一行）
+          const ovY = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+          if (ovY < minH * minOverlapY) continue;
+
+          // 横向间距（负数 = 重叠）
+          const gap = Math.max(a.x, b.x) - Math.min(a.x + a.w, b.x + b.w);
+          if (gap > minH * gapRatio) continue;
+          if (gap < minH * minGapRatio) continue;
+
+          const x0 = Math.min(a.x, b.x);
+          const y0 = Math.min(a.y, b.y);
+          const x1 = Math.max(a.x + a.w, b.x + b.w);
+          const y1 = Math.max(a.y + a.h, b.y + b.h);
+
+          list[i] = {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+            src: joinSrc(a.src, b.src),
+            dst: joinDst(a.dst, b.dst),
+            engine: a.engine || b.engine,
+            warn: a.warn || b.warn,
+            // 记一笔来源条数，方便调试"到底把几块并成了一条"
+            mergedCount: (a.mergedCount || 1) + (b.mergedCount || 1),
+          };
+          list.splice(j, 1);
+          merged++;
+          changed = true;
+          break outer; // 重头再扫：合并后的块可能有新邻居
+        }
+      }
+
+      if (!changed) break;
+    }
+
+    return { items: list, merged: merged };
+  }
+
+  /* ============================================================
    * 文本比对
    * ============================================================ */
 
@@ -649,6 +764,7 @@
     containsPoint: containsPoint,
     groupBoxesIntoBlocks: groupBoxesIntoBlocks,
     dedupeOverlappingItems: dedupeOverlappingItems,
+    mergeAdjacentItems: mergeAdjacentItems,
     // 文本
     normText: normText,
     similarity: similarity,

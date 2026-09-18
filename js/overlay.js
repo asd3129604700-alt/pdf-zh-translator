@@ -498,6 +498,70 @@
   /** 与背景亮度差多少算"墨" */
   const INK_CONTRAST = 38;
 
+  /**
+   * 从框的右边缘往右，有多少**干净的空白**可以用。
+   *
+   * 为什么不能只看"邻居文字有多远"：邻居只告诉我们"那里没有**文字**"，
+   * 但那里可能有表格线、边框、插画。中文一旦按"到邻居为止"的宽度折行、
+   * 放大，就会横穿表格线、压在图案上 —— 看起来比字小更糟。
+   *
+   * 所以这里直接看像素：从框右边缘开始逐列扫（只扫框所在的那几条行），
+   * 一旦某一列出现"与背景亮度明显不同"的像素（表格线、图案、别的字都算），
+   * 就到此为止。返回可用的像素宽度。
+   */
+  function freeRightWidth(srcCtx, box, maxRight, opts) {
+    opts = opts || {};
+    const contrast = opts.contrast == null ? INK_CONTRAST : opts.contrast;
+    const canvasW = srcCtx.canvas ? srcCtx.canvas.width : 0;
+    const canvasH = srcCtx.canvas ? srcCtx.canvas.height : 0;
+    const x0 = U.clamp(Math.ceil(box.x + box.w), 0, Math.max(0, canvasW));
+    const x1 = U.clamp(Math.floor(maxRight), x0, Math.max(x0, canvasW));
+    const ww = x1 - x0;
+    if (ww <= 0) return 0;
+    const y0 = U.clamp(Math.floor(box.y), 0, Math.max(0, canvasH - 1));
+    const y1 = U.clamp(Math.ceil(box.y + box.h), y0 + 1, Math.max(y0 + 1, canvasH));
+    const hh = y1 - y0;
+
+    let img;
+    try {
+      img = srcCtx.getImageData(x0, y0, ww, hh);
+    } catch (e) {
+      return ww; // 读不到就当全是空白：保守起见按"邻居边界"处理
+    }
+    const d = img.data;
+    const n = ww * hh;
+    const hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) {
+      const o = i * 4;
+      const v = (0.299 * d[o] + 0.587 * d[o + 1] + 0.114 * d[o + 2]) | 0;
+      hist[v < 0 ? 0 : v > 255 ? 255 : v]++;
+    }
+    let acc = 0;
+    let bgLum = 255;
+    for (let v = 0; v < 256; v++) {
+      acc += hist[v];
+      if (acc >= n / 2) {
+        bgLum = v;
+        break;
+      }
+    }
+
+    // 一列里超过 1/4 的像素"不是背景" → 这一列有东西，到此为止
+    const colLimit = Math.max(1, Math.floor(hh * 0.25));
+    for (let x = 0; x < ww; x++) {
+      let ink = 0;
+      for (let y = 0; y < hh; y++) {
+        const o = (y * ww + x) * 4;
+        const lum = 0.299 * d[o] + 0.587 * d[o + 1] + 0.114 * d[o + 2];
+        if (Math.abs(lum - bgLum) > contrast) {
+          ink++;
+          if (ink > colLimit) return x;
+        }
+      }
+    }
+    return ww;
+  }
+
   function measureInk(ctx, box, canvasW, canvasH, opts) {
     opts = opts || {};
     const contrast = opts.contrast == null ? INK_CONTRAST : opts.contrast;
@@ -924,6 +988,8 @@
       eraseProtected: 0,
       eraseResidual: 0,
       residualBlocks: 0,
+      // 有多少条因为"覆盖矩形装不下"而按实际宽度重排过（防"贴不全"）
+      relayout: 0,
       lowCoverage: 0,
       lowInkYield: 0,
       failed: 0,
@@ -1008,32 +1074,83 @@
           sizeCap = Math.min(sizeCap, Math.max(ink.lineHeight * fontGrow, readableFloor));
         }
 
-        const laid = layoutText(measure, String(it.dst), textBox, {
-          minFontSize: minFontSize,
-          maxFontSize: sizeCap,
-          // 从上限往下试：中文短，先试大的
-          startAtMax: true,
-          allowTop: lim.top,
-          allowBottom: lim.bottom,
-          allowH: lim.allowH,
-          // 横向可用空间：允许"轻微溢出"时不能越过邻居
-          allowW: Math.max(1, lim.right - lim.left),
-          minorOverflowMaxGlyphCount: opts.minorOverflowMaxGlyphCount,
-          minorOverflowShrinkMinScale: opts.minorOverflowShrinkMinScale,
-          fontFillRatio: opts.fontFillRatio,
-          lineHeightRatio: opts.lineHeightRatio,
-        });
+        // 横向可用空间要按**对齐锚点**算，不能一律用"邻居之间的总宽度"。
+        //
+        // 这里修的就是用户说的"贴不全"：覆盖矩形（= 绘制时的裁剪矩形）是按
+        // 邻居边界夹出来的，而排版如果按"邻居之间的总宽度"放宽，中文就会画到
+        // 覆盖矩形之外 —— 超出部分被 clip 掉，尾巴上少一两个字。
+        // 左对齐时文字从墨迹左边起画，能用的宽度就是"到右邻居为止"；
+        // 居中时两边各摊一半；右对齐时往左长，不受右侧限制。
+        const anchorX = ink ? ink.x : textBox.x;
+        const anchorW = ink ? ink.w : textBox.w;
+        const align = ink ? ink.alignment : "left";
+        let availW = Math.max(1, lim.right - anchorX);
+        if (align === "center") {
+          availW = Math.max(1, 2 * (lim.right - (anchorX + anchorW / 2)));
+        } else if (align === "right") {
+          availW = Math.max(1, lim.right - lim.left);
+        }
+
+        // 折行宽度不能只用"原文墨迹有多宽"。
+        //
+        // 这是"有的字小"的真正原因：中文哪怕字数比英文少，**每个字占一个全角宽**
+        // （12 个汉字 = 12em，12 个字母只有约 6.6em），所以照原文墨迹宽度折行，
+        // 一句中文常被折成 2~4 行；而行数一多就撞上"可用高度"上限（邻居约束），
+        // 只能一路缩字号 —— 同一批里，恰好能塞进一行的那几条就完全正常，
+        // 需要多一点点宽度的就被压小，看起来毫无规律。
+        //
+        // 于是折行宽度改成"**到右邻居为止的可用空间**"，但要先看**像素**：
+        // 只有右侧真的是干净空白（没有表格线、图案、别的字）才敢往那边放。
+        // 邻居只保证"那里没有文字"，不保证"那里什么都没有" ——
+        // 中文横穿一根表格线，比字小更难看。判定见 freeRightWidth。
+        //
+        // 上限是"再放宽一倍原文墨迹宽"（共 3 倍），避免一条短标签的译文
+        // 横穿整个表格；同时文字画到哪，覆盖矩形就跟着扩到哪，
+        // 而覆盖矩形再被邻居边界夹住 —— 不会压到别人。
+        let wrapW = textBox.w;
+        if (align === "left" && availW > textBox.w) {
+          const maxRight = Math.min(lim.right, textBox.x + availW);
+          const room = freeRightWidth(srcCtx, textBox, maxRight, { contrast: opts.inkContrast });
+          const grow = Math.max(0, Math.min(room, textBox.w * 2, availW - textBox.w));
+          wrapW = textBox.w + grow;
+        }
+
+        const makeLayout = function (boxW, noOverflow) {
+          return layoutText(
+            measure,
+            String(it.dst),
+            {
+              x: textBox.x,
+              y: textBox.y,
+              w: noOverflow ? Math.max(8, boxW) : wrapW,
+              h: textBox.h,
+            },
+            {
+              minFontSize: minFontSize,
+              maxFontSize: sizeCap,
+              // 从上限往下试：中文短，先试大的
+              startAtMax: true,
+              allowTop: lim.top,
+              allowBottom: lim.bottom,
+              allowH: lim.allowH,
+              allowW: noOverflow ? Math.max(1, boxW) : availW,
+              // 重排时关掉"轻微溢出"：这时候的目标是**保证不被裁**，不是保字号
+              minorOverflowMaxGlyphCount: noOverflow ? 0 : opts.minorOverflowMaxGlyphCount,
+              minorOverflowShrinkMinScale: opts.minorOverflowShrinkMinScale,
+              fontFillRatio: opts.fontFillRatio,
+              lineHeightRatio: opts.lineHeightRatio,
+            }
+          );
+        };
 
         // 绘制起点：按原文的对齐方式定位。
         // 中文一般比英文短，如果原文是居中的标题，一律从左边起画就会明显偏左。
-        let drawX = laid.x;
-        if (ink && laid.widest > 0) {
-          if (ink.alignment === "center") {
-            drawX = ink.x + (ink.w - laid.widest) / 2;
-          } else if (ink.alignment === "right") {
-            drawX = ink.x + ink.w - laid.widest;
-          }
-        }
+        const anchorDrawX = function (l) {
+          if (!ink || l.widest <= 0) return l.x;
+          if (ink.alignment === "center") return ink.x + (ink.w - l.widest) / 2;
+          if (ink.alignment === "right") return ink.x + ink.w - l.widest;
+          return l.x;
+        };
 
         // 去字范围 = 原框 ∪ 实际文字块 ∪ **真正画出来的中文范围**，再加一圈余量。
         //
@@ -1047,17 +1164,41 @@
         // 但**必须是固定上限、不能再迭代扩张** —— 见下面那段注释。
         const padX = Math.max(3, Math.round(it.h * 0.25));
         const padY = Math.max(3, Math.round(it.h * 0.3));
-        const textL = drawX;
-        const textR = drawX + Math.max(0, laid.widest);
 
         // 夹在邻居允许的范围内：宁可少擦一点，也绝不能压到旁边的文字。
-        let bx = Math.max(Math.min(it.x - padX, textL - padX), lim.left);
-        let by = Math.max(Math.min(it.y, laid.y) - padY, lim.top);
-        let bx1 = Math.min(Math.max(it.x + it.w + padX, textR + padX), lim.right);
-        let by1 = Math.min(Math.max(it.y + it.h, laid.y + laid.blockH) + padY, lim.bottom);
-        if (bx1 <= bx) bx1 = Math.min(bx + 1, lim.right);
-        if (by1 <= by) by1 = Math.min(by + 1, lim.bottom);
-        const cover = { x: bx, y: by, w: bx1 - bx, h: by1 - by };
+        const coverFor = function (l, dx) {
+          const textL = dx;
+          const textR = dx + Math.max(0, l.widest);
+          let cx = Math.max(Math.min(it.x - padX, textL - padX), lim.left);
+          let cy = Math.max(Math.min(it.y, l.y) - padY, lim.top);
+          let cx1 = Math.min(Math.max(it.x + it.w + padX, textR + padX), lim.right);
+          let cy1 = Math.min(Math.max(it.y + it.h, l.y + l.blockH) + padY, lim.bottom);
+          if (cx1 <= cx) cx1 = Math.min(cx + 1, lim.right);
+          if (cy1 <= cy) cy1 = Math.min(cy + 1, lim.bottom);
+          return { x: cx, y: cy, w: cx1 - cx, h: cy1 - cy };
+        };
+
+        let laid = makeLayout(null, false);
+        let drawX = anchorDrawX(laid);
+        let cover = coverFor(laid, drawX);
+
+        // 覆盖矩形被邻居夹窄了、装不下这行中文 → **按实际可用宽度重排一次**。
+        // 宁可字小一点、多折一行，也不能让尾巴被裁掉：被裁掉的字用户根本看不到，
+        // 而"看不到"比"小一点"严重得多。
+        if (laid.widest > cover.w + 0.5) {
+          const narrow = makeLayout(Math.max(8, cover.w), true);
+          if (narrow.widest <= cover.w + 0.5 || narrow.widest < laid.widest) {
+            laid = narrow;
+            drawX = anchorDrawX(laid);
+            cover = coverFor(laid, drawX);
+            if (stats) stats.relayout++;
+          }
+        }
+
+        // 最后再兜一次底：把起点夹进覆盖矩形，保证中文整段都画得出来。
+        if (laid.widest > 0 && laid.widest <= cover.w) {
+          drawX = U.clamp(drawX, cover.x, cover.x + cover.w - laid.widest);
+        }
 
         // ⚠ 这里以前有一段 growCoverUntilClean：不断向外扩张直到"边缘干净"。
         // 那是错的，而且是"涂抹做得太差"的主因：
@@ -1183,6 +1324,7 @@
     isCJK: isCJK,
     // 去字干净程度相关的内部函数（单测要用）
     measureInk: measureInk,
+    freeRightWidth: freeRightWidth,
     classifyField: classifyField,
     colorForItem: colorForItem,
     inferAlignment: inferAlignment,

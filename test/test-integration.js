@@ -1566,9 +1566,224 @@ console.log("\n[8] 去字：文字掩膜 + 无缝修复");
     );
   }
 
+  // ---------- 折行宽度：必须用到"到邻居为止"的空间（修"有的字小"） ----------
+  {
+    const cv = makeSoftCanvas(W, H);
+    paint(cv, { x: 0, y: 0, w: W, h: H }, [255, 255, 255]);
+    // 左边一块英文：墨迹只有 32px 宽（三个字形）
+    paint(cv, { x: 22, y: 28, w: 8, h: 12 }, [0, 0, 0]);
+    paint(cv, { x: 34, y: 28, w: 8, h: 12 }, [0, 0, 0]);
+    paint(cv, { x: 46, y: 28, w: 8, h: 12 }, [0, 0, 0]);
+    // 右边另一条（同一行），留出约 30px 空隙
+    paint(cv, { x: 84, y: 28, w: 40, h: 12 }, [0, 0, 0]);
+
+    const a = { x: 18, y: 26, w: 64, h: 16, src: "MATERIAL SPEC", dst: "材质规格与工艺说明文字" };
+    const b = { x: 84, y: 26, w: 44, h: 16, src: "SIZE", dst: "尺寸" };
+    let coverA = null;
+    let coverB = null;
+    const out = globalThis.PZOverlay.render(cv, [a, b], {
+      cover: true,
+      eraseMode: "ink",
+      minFontSize: 6,
+      onCover: function (cov, box) {
+        if (box.x === a.x) coverA = cov;
+        else coverB = cov;
+      },
+    });
+
+    // 按测试画布的 measureText 规则算实际画出来的宽度
+    const textMetrics = function (t) {
+      const m = /(\d+(?:\.\d+)?)px/.exec(t.font);
+      const fs = m ? parseFloat(m[1]) : 10;
+      let w = 0;
+      for (const ch of t.text) {
+        w += /[\u4e00-\u9fff\uff00-\uffef\u3000-\u303f]/.test(ch) ? fs : fs * 0.55;
+      }
+      return { fs: fs, w: w };
+    };
+
+    const texts = out.getContext("2d")._texts;
+    const aTexts = texts.filter(function (t) {
+      return t.x < coverB.x;
+    });
+
+    ok("字小：中文用到了右侧空闲空间，没有被折成很多行", aTexts.length >= 1, "A 的行数 " + aTexts.length);
+    ok(
+      "字小：12 个汉字在 64px 宽的原框里排到了 ≥9px（旧实现只用 32px 墨迹宽折行，只能排 7px）",
+      aTexts.length > 0 && textMetrics(aTexts[0]).fs >= 9,
+      "字号 " + (aTexts.length ? textMetrics(aTexts[0]).fs : "?")
+    );
+
+    const clipped = aTexts.filter(function (t) {
+      const mm = textMetrics(t);
+      return t.x + mm.w > coverA.x + coverA.w + 1;
+    });
+    ok(
+      "贴不全：A 的中文整段都落在覆盖矩形内（尾巴不会被 clip 掉）",
+      aTexts.length > 0 && clipped.length === 0,
+      clipped.length ? clipped.length + " 行画到了覆盖矩形之外" : ""
+    );
+
+    // 邻居必须保住：中文不能压过去
+    const overlapsNeighbor = aTexts.some(function (t) {
+      const mm = textMetrics(t);
+      return t.x + mm.w > coverB.x + 0.5;
+    });
+    ok("字小：放大的同时没有压到右边那条", !overlapsNeighbor);
+  }
+
+  // ---------- 向右扩张必须在"干净空白"里停下（不许横穿表格线） ----------
+  {
+    const cv = makeSoftCanvas(W, H);
+    paint(cv, { x: 0, y: 0, w: W, h: H }, [255, 255, 255]);
+    // 文字：三个字形，墨迹 22..54
+    paint(cv, { x: 22, y: 28, w: 8, h: 12 }, [0, 0, 0]);
+    paint(cv, { x: 34, y: 28, w: 8, h: 12 }, [0, 0, 0]);
+    paint(cv, { x: 46, y: 28, w: 8, h: 12 }, [0, 0, 0]);
+    // 右边 70 处一根竖着的表格线（贯穿上下）
+    paint(cv, { x: 70, y: 10, w: 2, h: 100 }, [0, 0, 0]);
+
+    const a = { x: 18, y: 26, w: 40, h: 16, src: "MATERIAL", dst: "材质规格与工艺说明" };
+    const out = globalThis.PZOverlay.render(cv, [a], {
+      cover: true,
+      eraseMode: "ink",
+      minFontSize: 6,
+    });
+
+    const texts = out.getContext("2d")._texts;
+    const widthOf = function (t) {
+      const m = /(\d+(?:\.\d+)?)px/.exec(t.font);
+      const fs = m ? parseFloat(m[1]) : 10;
+      let w = 0;
+      for (const ch of t.text) {
+        w += /[\u4e00-\u9fff\uff00-\uffef\u3000-\u303f]/.test(ch) ? fs : fs * 0.55;
+      }
+      return w;
+    };
+    const cross = texts.filter(function (t) {
+      return t.x + widthOf(t) > 70;
+    });
+    ok(
+      "不许横穿：右侧有表格线时，中文不会扩到线右边去",
+      texts.length > 0 && cross.length === 0,
+      cross.length ? cross.length + " 行越过了表格线" : ""
+    );
+    ok("表格线本身还在", readPx(out, 71, 30)[0] < 60, "线像素 " + readPx(out, 71, 30).join(","));
+
+    // 直接量一下"右侧干净空白"这个工具函数
+    const room = globalThis.PZOverlay.freeRightWidth(
+      cv.getContext("2d"),
+      { x: 22, y: 28, w: 32, h: 12 },
+      300,
+      {}
+    );
+    ok(
+      "freeRightWidth：从墨迹右缘(54)到表格线(70)之间只有 16px 干净空白",
+      room >= 14 && room <= 17,
+      "量到 " + room + "px"
+    );
+  }
+
+  // ---------- 合并相邻碎块（用户点名要的做法） ----------
+  {
+    const UM = globalThis.PZUtil;
+
+    // 同一行、挨得近 → 并成一条；原文空格连接，中文直接连
+    {
+      const items = [
+        { x: 20, y: 30, w: 40, h: 12, src: "MATERIAL", dst: "材质" },
+        { x: 64, y: 30, w: 30, h: 12, src: "SPEC", dst: "规格" },
+      ];
+      const r = UM.mergeAdjacentItems(items);
+      ok("合并：同一行挨得近的两块并成一条", r.items.length === 1 && r.merged === 1, "剩 " + r.items.length + " 条");
+      ok("合并：原文用空格连接", r.items[0].src === "MATERIAL SPEC", r.items[0].src);
+      ok("合并：中文直接连（不加空格）", r.items[0].dst === "材质规格", r.items[0].dst);
+      ok(
+        "合并：坐标取并集",
+        r.items[0].x === 20 && r.items[0].y === 30 && r.items[0].w === 74 && r.items[0].h === 12,
+        JSON.stringify({ x: r.items[0].x, w: r.items[0].w })
+      );
+    }
+
+    // 隔得远（表格两列）→ 不并
+    {
+      const items = [
+        { x: 20, y: 30, w: 40, h: 12, src: "MATERIAL", dst: "材质" },
+        { x: 200, y: 30, w: 40, h: 12, src: "SIZE", dst: "尺寸" },
+      ];
+      const r = UM.mergeAdjacentItems(items);
+      ok("合并：中间隔着一整段空白（表格列）→ 不并", r.items.length === 2 && r.merged === 0);
+    }
+
+    // 上下两行 → 不并（只做同一行）
+    {
+      const items = [
+        { x: 20, y: 30, w: 40, h: 12, src: "A", dst: "甲" },
+        { x: 22, y: 46, w: 40, h: 12, src: "B", dst: "乙" },
+      ];
+      const r = UM.mergeAdjacentItems(items);
+      ok("合并：上下两行不并（不做跨行合并）", r.items.length === 2 && r.merged === 0);
+    }
+
+    // 高度差太大（大标题 + 小标注）→ 不并
+    {
+      const items = [
+        { x: 20, y: 30, w: 60, h: 30, src: "TITLE", dst: "标题" },
+        { x: 84, y: 42, w: 26, h: 12, src: "note", dst: "说明" },
+      ];
+      const r = UM.mergeAdjacentItems(items);
+      ok("合并：大标题和小标注不并（高度比超过上限）", r.items.length === 2 && r.merged === 0);
+    }
+
+    // 大幅重叠（重复识别）→ 交给去重，不该在合并这步被粘成重复文本
+    {
+      const items = [
+        { x: 20, y: 30, w: 60, h: 12, src: "MATERIAL", dst: "材质" },
+        { x: 24, y: 30, w: 58, h: 12, src: "MATERIAL", dst: "材质" },
+      ];
+      const r = UM.mergeAdjacentItems(items);
+      ok("合并：重叠的重复条不并（避免变成「材质材质」）", r.items.length === 2 && r.merged === 0);
+    }
+
+    // 三个碎块连成一串 → 全并成一条
+    {
+      const items = [
+        { x: 20, y: 30, w: 30, h: 12, src: "A", dst: "甲" },
+        { x: 54, y: 30, w: 30, h: 12, src: "B", dst: "乙" },
+        { x: 88, y: 30, w: 30, h: 12, src: "C", dst: "丙" },
+      ];
+      const r = UM.mergeAdjacentItems(items);
+      ok("合并：三个相邻碎块并成一条", r.items.length === 1 && r.merged === 2, "剩 " + r.items.length + " 条");
+      ok(
+        "合并：三段的文字按顺序连起来",
+        r.items[0].src === "A B C" && r.items[0].dst === "甲乙丙",
+        r.items[0].src + " / " + r.items[0].dst
+      );
+    }
+
+    // 英文目标语言（非 CJK）：译文之间要补空格
+    {
+      const items = [
+        { x: 20, y: 30, w: 40, h: 12, src: "材质", dst: "Material" },
+        { x: 64, y: 30, w: 40, h: 12, src: "规格", dst: "Spec" },
+      ];
+      const r = UM.mergeAdjacentItems(items);
+      ok("合并：英文译文之间补空格", r.items[0].dst === "Material Spec", r.items[0].dst);
+    }
+
+    // 空条目：没有 dst（只识别模式）也要能并，不能产出 "undefined"
+    {
+      const items = [
+        { x: 20, y: 30, w: 40, h: 12, src: "A", dst: "" },
+        { x: 64, y: 30, w: 40, h: 12, src: "B", dst: "" },
+      ];
+      const r = UM.mergeAdjacentItems(items);
+      ok("合并：没有译文时不产出 undefined", r.items.length === 1 && r.items[0].dst === "", JSON.stringify(r.items[0]));
+    }
+  }
+
   U.setCanvasFactory(null);
 }
-
 /* ============================================================
  * 9. 实测框内几何（measureInk）—— 字号与对齐的依据
  * ============================================================ */
