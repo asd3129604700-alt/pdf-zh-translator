@@ -815,6 +815,11 @@
       minReadableSize: C.LIMITS.overlayMinReadableSize,
       // 中文字号放大系数（用户可调，见「中文字号」下拉框）
       fontGrow: getFontGrow(),
+      // 优先用条目上的字号线索（PDF text layer / OCR 行高）
+      preferItemFontHeight: true,
+      // 无论 PDF 还是图片：有译文就必须把原文盖干净再写中文。
+      // ink 模式在彩底/红字上容易留残影，用户看到的「贴不好」多半是英文还露着。
+      forceCoverFill: true,
       // 去字
       eraseMode: ctx.eraseMode,
       eraseRingWidth: C.LIMITS.eraseRingWidth,
@@ -891,6 +896,8 @@
           y: l.y * scale,
           w: l.w * scale,
           h: l.h * scale,
+          // pdf.js 给出的字号（em，已乘渲染倍率）—— 比像素墨迹高度可靠得多
+          fontHeight: (l.fontHeight || 0) * scale,
           src: l.text,
           dst: t.dst == null ? l.text : t.dst,
           engine: t.engine,
@@ -905,7 +912,10 @@
       // PDF 的文字层同样是按"文本片段"给的：一行里标签和数值常是两个片段，
       // 分开排版会互相夹住空间 —— 和图片那条路是同一个问题，所以同样走合并。
       const pd = prepareItems(items, ctx);
-      const composed = OV.render(rendered, pd, overlayOpts(ctx));
+      // PDF：文字框来自文字层，覆盖时整框填底色，避免英文残影
+      const ov = overlayOpts(ctx);
+      ov.forceCoverFill = true;
+      const composed = OV.render(rendered, pd, ov);
 
       pages.push({
         original: rendered,
@@ -1160,6 +1170,8 @@
           y: l.y,
           w: l.w,
           h: l.h,
+          // OCR 行框高度 ≈ 行高；真实字号约为 h/0.72（西文 cap-height）
+          fontHeight: (l.fontHeight || l.h || 0) > 0 ? (l.fontHeight || l.h) / 0.72 : 0,
           src: l.text,
           dst: l.text,
           engine: "ocr",
@@ -1807,11 +1819,15 @@
   function boot() {
     loadLocalGlossary().then(function (local) {
       if (local) {
-        const prof = C.PROFILES.toy_spec;
-        if (prof) {
-          prof.glossary = local;
-          prof.desc = "本机私有词表（glossary.local.txt 已加载，不进仓库）";
-        }
+        Object.keys(C.PROFILES).forEach(function (key) {
+          const prof = C.PROFILES[key];
+          if (!prof) return;
+          // 本机词表优先：拼在预设前面，general 也能吃到
+          prof.glossary = prof.glossary ? local + "\n" + prof.glossary : local;
+          if (key === "toy_spec") {
+            prof.desc = "本机私有词表（glossary.local.txt 已加载，不进仓库）";
+          }
+        });
       }
       init();
     });

@@ -661,8 +661,6 @@
     let lineHeight = inkH;
     let lineCount = 1;
     if (bands.length > 1) {
-      // 用各行带高度的中位数当"单行高"：比 inkH/行数 稳，
-      // 不会被某一行带降部、或一行里的零星杂点带偏
       const hs = bands
         .map(function (b) {
           return b.h;
@@ -672,6 +670,16 @@
         });
       lineHeight = hs[hs.length >> 1];
       lineCount = bands.length;
+    } else if (bands.length === 1 && bands[0].h >= 10) {
+      // 单条墨带很高：密排时行间空隙不足，Tesseract/分带会把多行粘成一条。
+      // 不能把整块高度当成单行字号 —— 那是「有的字特别大」的直接原因。
+      // 这里只做一个保守启发：墨带明显高于常见正文行高时，按 1.35~1.55 倍
+      // 行距反推行数；确切数值仍会在 render 里用「本页中位行高」校正。
+      const bh = bands[0].h;
+      const guessLine = Math.max(9, Math.min(28, Math.round(bh * 0.38)));
+      const est = Math.max(2, Math.round(bh / guessLine));
+      lineCount = est;
+      lineHeight = bh / est;
     }
 
     return {
@@ -1040,47 +1048,116 @@
       gap: opts.neighborGap == null ? 3 : opts.neighborGap,
     });
 
+    // ---------- 第一遍：实测每条的墨迹几何 ----------
+    //
+    // 字号不能各自为政：同一页上的说明文字，理想情况应落在同一档。
+    // 原实现对每条独立算 sizeCap，OCR 把多行粘成一条时 lineHeight 偏大，
+    // 该条中文就会突然变大；邻条若被压成两行又会突然变小 ——
+    // 用户看到的「有的大有的小」多半来自这里。
+    const inkOf = new Array(work.length);
+    const rawLineHs = [];
+    for (let i = 0; i < work.length; i++) {
+      const it = work[i];
+      let ink =
+        opts.measureInk === false
+          ? null
+          : measureInk(srcCtx, it, canvas.width, canvas.height, {
+              contrast: opts.inkContrast,
+            });
+      if (ink && ink.lineHeight > 0) {
+        // 用「本框高 / 行数」再校一次：粘连时 measureInk 可能仍偏大
+        if (ink.lineCount >= 1) {
+          const avg = ink.h / ink.lineCount;
+          if (avg > 0 && (ink.lineHeight > avg * 1.45 || ink.lineHeight < avg * 0.55)) {
+            ink = Object.assign({}, ink, {
+              lineHeight: avg,
+              lineCount: Math.max(1, Math.round(ink.h / Math.max(4, avg))),
+            });
+          }
+        }
+        rawLineHs.push(ink.lineHeight);
+      }
+      inkOf[i] = ink;
+    }
+
+    // 本页「单行墨迹高」的中位数 —— 字号归一化的锚点
+    const sortedHs = rawLineHs.slice().sort(function (a, b) {
+      return a - b;
+    });
+    const medianLH =
+      sortedHs.length > 0 ? sortedHs[sortedHs.length >> 1] : 0;
+
+    // 再校正：明显偏离中位数的 lineHeight 按行数重估
+    if (medianLH > 4) {
+      for (let i = 0; i < inkOf.length; i++) {
+        const ink = inkOf[i];
+        if (!ink || !(ink.lineHeight > 0)) continue;
+        const ratio = ink.lineHeight / medianLH;
+        if (ratio >= 1.8 || ratio <= 0.45) {
+          const est = Math.max(1, Math.round(ink.h / medianLH));
+          ink.lineHeight = medianLH;
+          ink.lineCount = est;
+        }
+      }
+    }
+
+    const fontGrow = opts.fontGrow > 0 ? opts.fontGrow : DEFAULT_FONT_GROW;
+    const readableFloor = opts.minReadableSize == null ? 11 : opts.minReadableSize;
+    // 页内允许的字号带宽：太宽会回到「忽大忽小」，太窄会牺牲标题层级
+    const sizeLow = medianLH > 0 ? Math.max(readableFloor, medianLH * fontGrow * 0.72) : readableFloor;
+    const sizeHigh =
+      medianLH > 0
+        ? Math.max(sizeLow + 2, medianLH * fontGrow * 1.28)
+        : Infinity;
+
     for (let i = 0; i < work.length; i++) {
       if (opts.signal && opts.signal.aborted) break;
       const it = work[i];
       const lim = limits[i];
 
       try {
-        // 先实测框内文字的真实几何（外接框 + 行数），不要直接信传进来的框。
-        // 上游的框可能比文字宽（→ 中文左偏），也可能装着一整段（→ 字号算得过大）。
-        const ink =
-          opts.measureInk === false
-            ? null
-            : measureInk(srcCtx, it, canvas.width, canvas.height, {
-                contrast: opts.inkContrast,
-              });
-
+        const ink = inkOf[i];
         const textBox = ink
           ? { x: ink.x, y: ink.y, w: ink.w, h: ink.h }
           : { x: it.x, y: it.y, w: it.w, h: it.h };
 
         // 字号上限：
-        //  · 基准是原文的**单行墨迹高度**（不是字号 —— 西文的墨迹高度只有字号的
-        //    ~0.7 倍，直接照搬就已经让中文小了一圈）；
-        //  · 再乘一个放大系数 fontGrow。用户的判断很直接：中文一定比英文字数少，
-        //    框内横向有余量，凭什么不能比英文大？所以允许超过原文。
-        //    装不下时 layoutText 会自己降字号，宽高都受 allowW/allowH 约束，
-        //    不会回到"字体太大、对不齐"那一版（那是**没有**邻居约束时才出的问题）。
-        //  · 原文本身很小时（8~9px 的标注）另给一个可读下限。
-        const readableFloor = opts.minReadableSize == null ? 11 : opts.minReadableSize;
-        const fontGrow = opts.fontGrow > 0 ? opts.fontGrow : DEFAULT_FONT_GROW;
+        //  1) 原文单行墨迹高 × fontGrow
+        //  2) 本页中位数带宽内的 sizeHigh（防止粘连框独大）
+        //  3) 框高硬顶：单行中文不应超过原框高度太多
         let sizeCap = opts.maxFontSize || Infinity;
-        if (ink && ink.lineHeight > 0) {
-          sizeCap = Math.min(sizeCap, Math.max(ink.lineHeight * fontGrow, readableFloor));
+        // PDF 文字层：item.fontHeight 就是字号（em），比墨迹高度可靠。
+        // 页内「忽大忽小」多半来自：有的框 measureInk 量成整段高、有的只量到半行。
+        const emHint =
+          opts.preferItemFontHeight !== false && it.fontHeight > 0
+            ? it.fontHeight
+            : ink && ink.lineHeight > 0
+              ? ink.lineHeight / 0.72
+              : 0;
+        if (emHint > 0) {
+          const byEm = emHint * fontGrow;
+          const byBox = Math.max(textBox.h * 1.15, readableFloor);
+          sizeCap = Math.min(sizeCap, byEm, byBox);
+          if (medianLH > 4) {
+            // 页内软约束：避免个别框的 fontHeight 异常导致独大/独小
+            const pageEm = medianLH; // 若多数框用 ink，median 接近正文墨迹高
+            const softHigh = Math.max(byEm, pageEm * fontGrow * 1.2);
+            const softLow = Math.max(readableFloor, Math.min(byEm, pageEm * fontGrow * 0.75));
+            sizeCap = U.clamp(sizeCap, softLow, softHigh);
+          }
+        } else if (ink && ink.lineHeight > 0) {
+          const byInk = ink.lineHeight * fontGrow;
+          const byBox = Math.max(textBox.h * 1.2, readableFloor);
+          const byPage = sizeHigh;
+          sizeCap = Math.min(byInk, byBox, byPage);
+          if (String(it.dst).length <= 6 && medianLH > 0) {
+            sizeCap = Math.min(byBox, Math.max(byInk, medianLH * fontGrow * 1.35));
+          }
+          sizeCap = Math.max(sizeCap, Math.min(readableFloor, sizeLow + 4));
+        } else if (medianLH > 0) {
+          sizeCap = Math.min(sizeCap, sizeHigh);
         }
-
-        // 横向可用空间要按**对齐锚点**算，不能一律用"邻居之间的总宽度"。
-        //
-        // 这里修的就是用户说的"贴不全"：覆盖矩形（= 绘制时的裁剪矩形）是按
-        // 邻居边界夹出来的，而排版如果按"邻居之间的总宽度"放宽，中文就会画到
-        // 覆盖矩形之外 —— 超出部分被 clip 掉，尾巴上少一两个字。
-        // 左对齐时文字从墨迹左边起画，能用的宽度就是"到右邻居为止"；
-        // 居中时两边各摊一半；右对齐时往左长，不受右侧限制。
+        // 折行宽度 / 对齐逻辑与原来相同
         const anchorX = ink ? ink.x : textBox.x;
         const anchorW = ink ? ink.w : textBox.w;
         const align = ink ? ink.alignment : "left";
@@ -1091,28 +1168,18 @@
           availW = Math.max(1, lim.right - lim.left);
         }
 
-        // 折行宽度不能只用"原文墨迹有多宽"。
-        //
-        // 这是"有的字小"的真正原因：中文哪怕字数比英文少，**每个字占一个全角宽**
-        // （12 个汉字 = 12em，12 个字母只有约 6.6em），所以照原文墨迹宽度折行，
-        // 一句中文常被折成 2~4 行；而行数一多就撞上"可用高度"上限（邻居约束），
-        // 只能一路缩字号 —— 同一批里，恰好能塞进一行的那几条就完全正常，
-        // 需要多一点点宽度的就被压小，看起来毫无规律。
-        //
-        // 于是折行宽度改成"**到右邻居为止的可用空间**"，但要先看**像素**：
-        // 只有右侧真的是干净空白（没有表格线、图案、别的字）才敢往那边放。
-        // 邻居只保证"那里没有文字"，不保证"那里什么都没有" ——
-        // 中文横穿一根表格线，比字小更难看。判定见 freeRightWidth。
-        //
-        // 上限是"再放宽一倍原文墨迹宽"（共 3 倍），避免一条短标签的译文
-        // 横穿整个表格；同时文字画到哪，覆盖矩形就跟着扩到哪，
-        // 而覆盖矩形再被邻居边界夹住 —— 不会压到别人。
         let wrapW = textBox.w;
         if (align === "left" && availW > textBox.w) {
           const maxRight = Math.min(lim.right, textBox.x + availW);
           const room = freeRightWidth(srcCtx, textBox, maxRight, { contrast: opts.inkContrast });
           const grow = Math.max(0, Math.min(room, textBox.w * 2, availW - textBox.w));
           wrapW = textBox.w + grow;
+        }
+        // 说明性正文：折行宽至少给到「约 12 个全角字」对应的空间，
+        // 否则同一页里有的塞进一行、有的被挤成三四行，字号就会劈叉。
+        if (medianLH > 4 && String(it.dst).length >= 8) {
+          const comfort = medianLH * fontGrow * 10;
+          wrapW = Math.max(wrapW, Math.min(comfort, availW));
         }
 
         const makeLayout = function (boxW, noOverflow) {
@@ -1183,12 +1250,38 @@
         let cover = coverFor(laid, drawX);
 
         // 覆盖矩形被邻居夹窄了、装不下这行中文 → **按实际可用宽度重排一次**。
-        // 宁可字小一点、多折一行，也不能让尾巴被裁掉：被裁掉的字用户根本看不到，
-        // 而"看不到"比"小一点"严重得多。
         if (laid.widest > cover.w + 0.5) {
           const narrow = makeLayout(Math.max(8, cover.w), true);
           if (narrow.widest <= cover.w + 0.5 || narrow.widest < laid.widest) {
             laid = narrow;
+            drawX = anchorDrawX(laid);
+            cover = coverFor(laid, drawX);
+            if (stats) stats.relayout++;
+          }
+        }
+
+        // 纵向也一样：中文块比覆盖矩形高时按可用高度重排，避免末行被裁掉。
+        if (laid.blockH > cover.h + 0.5) {
+          const shortBox = {
+            x: textBox.x,
+            y: textBox.y,
+            w: Math.max(8, Math.min(wrapW, availW)),
+            h: cover.h,
+          };
+          const fitted = layoutText(measure, String(it.dst), shortBox, {
+            minFontSize: minFontSize,
+            maxFontSize: sizeCap,
+            startAtMax: true,
+            allowTop: lim.top,
+            allowBottom: lim.bottom,
+            allowH: Math.max(cover.h, lim.allowH),
+            allowW: availW,
+            minorOverflowMaxGlyphCount: 0,
+            fontFillRatio: opts.fontFillRatio,
+            lineHeightRatio: opts.lineHeightRatio,
+          });
+          if (fitted.blockH <= cover.h + 0.5 || fitted.blockH < laid.blockH) {
+            laid = fitted;
             drawX = anchorDrawX(laid);
             cover = coverFor(laid, drawX);
             if (stats) stats.relayout++;
@@ -1270,6 +1363,10 @@
           }
         }
         if (!coverOk) {
+          paintBackground(ctx, cover, bg);
+        } else if (opts.forceCoverFill || (opts.preferItemFontHeight !== false && it.fontHeight > 0)) {
+          // PDF 文字层：框是精确的，ink 模式可能留下红字/彩底残影。
+          // 再整框填一次底色，保证英文被盖干净（底色采样已限制在浅色/均匀环上）。
           paintBackground(ctx, cover, bg);
         }
 

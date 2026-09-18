@@ -390,6 +390,8 @@
             dst: joinDst(a.dst, b.dst),
             engine: a.engine || b.engine,
             warn: a.warn || b.warn,
+            // 合并后保留字号线索：取两者较大 fontHeight（标题+正文粘连时不至于用正文小字号）
+            fontHeight: Math.max(a.fontHeight || 0, b.fontHeight || 0) || undefined,
             // 记一笔来源条数，方便调试"到底把几块并成了一条"
             mergedCount: (a.mergedCount || 1) + (b.mergedCount || 1),
           };
