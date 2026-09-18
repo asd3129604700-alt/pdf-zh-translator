@@ -873,14 +873,33 @@
     const ink = bgIsDark ? lightPix : darkPix;
     // 采样点太少说明框内本来就没有明显的字（可能是去重后剩下的空框），用默认值更稳
     if (ink.length >= Math.max(6, (w * h) / 400)) {
-      textColor = medianColor(ink);
-      if (!bgIsDark) {
-        // 略微压暗：中文小字在浅底上需要足够对比度才看得清
-        textColor = [
-          Math.round(textColor[0] * 0.92),
-          Math.round(textColor[1] * 0.92),
-          Math.round(textColor[2] * 0.92),
-        ];
+      // 彩色字（规格图里的红标题等）优先保留原字色，这是「像原稿」的关键之一
+      const colored = [];
+      for (let i = 0; i < ink.length; i++) {
+        const c = ink[i];
+        const mx = Math.max(c[0], c[1], c[2]);
+        const mn = Math.min(c[0], c[1], c[2]);
+        if (mx - mn > 42) colored.push(c);
+      }
+      if (colored.length >= Math.max(4, ink.length * 0.25)) {
+        textColor = medianColor(colored);
+        if (!bgIsDark) {
+          textColor = [
+            Math.round(textColor[0] * 0.95),
+            Math.round(textColor[1] * 0.95),
+            Math.round(textColor[2] * 0.95),
+          ];
+        }
+      } else {
+        textColor = medianColor(ink);
+        if (!bgIsDark) {
+          // 略微压暗：中文小字在浅底上需要足够对比度才看得清
+          textColor = [
+            Math.round(textColor[0] * 0.92),
+            Math.round(textColor[1] * 0.92),
+            Math.round(textColor[2] * 0.92),
+          ];
+        }
       }
     }
 
@@ -1257,6 +1276,23 @@
         };
 
         let laid = makeLayout(null, false);
+        // 尽量让中文行数贴近原文行数（Shinobu 那种「还是原来的版式」的感觉）
+        if (ink && ink.lineCount >= 2 && laid.lines.length !== ink.lineCount) {
+          const target = ink.lineCount;
+          const trials = [ink.w * 0.95, ink.w * 1.15, ink.w * 1.4, wrapW];
+          let best = laid;
+          for (let t = 0; t < trials.length; t++) {
+            const ww = trials[t];
+            if (!(ww > 8)) continue;
+            const alt = makeLayout(Math.min(ww, availW || ww), true);
+            const betterCount = Math.abs(alt.lines.length - target) < Math.abs(best.lines.length - target);
+            const similarSize = alt.fontSize >= best.fontSize * 0.92;
+            if (betterCount && similarSize) best = alt;
+          }
+          if (Math.abs(best.lines.length - target) <= Math.abs(laid.lines.length - target)) {
+            laid = best;
+          }
+        }
         let drawX = anchorDrawX(laid);
         let cover = coverFor(laid, drawX);
 
