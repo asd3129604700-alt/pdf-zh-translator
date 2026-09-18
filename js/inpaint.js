@@ -705,6 +705,11 @@
     const fillColor = opts.fillColor || dom.color;
 
     if (mode === "fill") {
+      // 环上主色占比过低：底不是纯色（红条/彩底/邻行文字），
+      // 整框刷主色会刷出难看的白块/色块，并盖掉旁边的字 —— 改回只擦墨迹。
+      if (dom.coverage < 0.55) {
+        return coverText(srcCtx, dstCtx, rect, Object.assign({}, opts, { mode: "ink" }));
+      }
       const d = img.data;
       const iw = img.width;
       for (let y = inner.y; y < inner.y + inner.h; y++) {
@@ -720,8 +725,6 @@
         ok: true,
         mode: "fill",
         fill: fillColor,
-        // 主色占环上样本的比例。接近 1 说明底色确实纯，填出来看不出痕迹；
-        // 偏低说明这块压在图案/渐变上，纯色填充会是一块看得见的色块。
         coverage: dom.coverage,
         unique: dom.unique,
         innerW: innerW,

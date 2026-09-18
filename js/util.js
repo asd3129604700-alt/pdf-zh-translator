@@ -291,6 +291,44 @@
     return { items: out, merged: merged };
   }
 
+  /**
+   * 视觉模型框常常互相大重叠：同一段说明被 region + whole 各报一次，
+   * 或一个框包住另一个框。不去字时 A 盖 B、B 再盖 A，
+   * 表现是「白块叠白块 / 中文压中文」。
+   *
+   * 规则：面积重叠比 > 0.42 时只保留「信息更多」的那条
+   * （译文更长 → 原文更长 → 面积更小（框更紧））。
+   */
+  function collapseOverlappingItems(items, opts) {
+    opts = opts || {};
+    const ovMin = opts.overlapMin == null ? 0.42 : opts.overlapMin;
+    const list = (items || []).slice().sort(function (a, b) {
+      const as = String(a.dst || a.src || "").length;
+      const bs = String(b.dst || b.src || "").length;
+      if (as !== bs) return bs - as;
+      const aa = Math.max(1, a.w * a.h);
+      const ba = Math.max(1, b.w * b.h);
+      return aa - ba; // 更紧的框优先（同文案长度时）
+    });
+    const kept = [];
+    let dropped = 0;
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      let covered = false;
+      for (let j = 0; j < kept.length; j++) {
+        const b = kept[j];
+        const ov = overlapRatio(a, b);
+        if (ov > ovMin) {
+          covered = true;
+          break;
+        }
+      }
+      if (covered) dropped++;
+      else kept.push(a);
+    }
+    return { items: kept, dropped: dropped };
+  }
+
   /* ============================================================
    * 相邻文字块合并
    * ============================================================ */
@@ -766,6 +804,7 @@
     containsPoint: containsPoint,
     groupBoxesIntoBlocks: groupBoxesIntoBlocks,
     dedupeOverlappingItems: dedupeOverlappingItems,
+    collapseOverlappingItems: collapseOverlappingItems,
     mergeAdjacentItems: mergeAdjacentItems,
     // 文本
     normText: normText,

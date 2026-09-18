@@ -1378,10 +1378,10 @@
         } else if (opts.forceCoverFill && !isVisionItem && (it.fontHeight > 0 || (ink && ink.inkDensity > 0.02))) {
           // PDF / 本地 OCR：框可靠，整框填底色，避免英文残影
           paintBackground(ctx, cover, bg);
-        } else if (isVisionItem && ink && ink.inkDensity > 0.02 && ink.lineHeight > 5) {
-          // 视觉路径：只填「墨迹框」范围，绝不用模型给的大框去刷角色/色块
-          paintBackground(ctx, cover, bg);
         }
+        // 视觉路径：**禁止**整框刷底色。模型框常包住邻行/插画，
+        // 刷白/刷主色会把旁边别的字一起抹掉，再写中文就成了「白块上的叠字」。
+        // 去字只靠上面的 ink / repair（只动与背景差异大的像素）。
 
         ctx.save();
         // 裁剪到覆盖范围：宁可字被裁掉一点，也绝不压到相邻文字

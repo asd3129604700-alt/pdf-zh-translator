@@ -261,7 +261,12 @@
     if (dd2.merged && ctx && ctx.log) {
       ctx.log("  再合并了 " + dd2.merged + " 条重复识别");
     }
-    return dd2.items;
+    // 视觉框重叠：后填的会把先画的中文连底色一起刷掉 → 白块/叠字
+    const collapse = U.collapseOverlappingItems(dd2.items, { overlapMin: 0.42 });
+    if (collapse.dropped && ctx && ctx.log) {
+      ctx.log("  丢掉 " + collapse.dropped + " 条与其它框大重叠的识别（防止互相盖字）");
+    }
+    return collapse.items;
   }
 
   /**
