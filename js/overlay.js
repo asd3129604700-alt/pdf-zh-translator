@@ -1219,27 +1219,38 @@
           return l.x;
         };
 
-        // 去字范围 = 原框 ∪ 实际文字块 ∪ **真正画出来的中文范围**，再加一圈余量。
-        //
-        // 最后一项是"允许轻微溢出"能成立的前提：中文可能比原框宽一点，
-        // 去字范围不跟着走的话，多出来的部分会被 clip 掉。
-        //
-        // 垂直方向的余量不能省：原文的 bbox 通常不含抗锯齿边缘和降部
-        // （g/y/p 的下半截会伸出去），不留余量就会在中文下面留一道灰边。
-        //
-        // 余量比"刚好贴合"大一些（行高的 1/4），因为上游的框可能偏小；
-        // 但**必须是固定上限、不能再迭代扩张** —— 见下面那段注释。
-        const padX = Math.max(3, Math.round(it.h * 0.25));
-        const padY = Math.max(3, Math.round(it.h * 0.3));
+        // 覆盖参考框：视觉模型经常返回「整段说明 + 引线」的大框，
+        // 若按 it.x/it.w 整块填充，会把角色/色块涂没 —— 用户说的「贴得巨难看」多半是这个。
+        // 规则：墨迹远小于上游框、或 engine 是 vision 时，只信实测墨迹框。
+        const engine = String(it.engine || "");
+        const isVisionItem = /vision/i.test(engine);
+        const itemArea = Math.max(1, it.w * it.h);
+        const inkArea = ink ? Math.max(1, ink.w * ink.h) : 0;
+        let refBox = { x: it.x, y: it.y, w: it.w, h: it.h };
+        if (ink && inkArea > 0) {
+          if (isVisionItem || itemArea > inkArea * 2.0) {
+            refBox = { x: ink.x, y: ink.y, w: ink.w, h: ink.h };
+          } else {
+            // PDF/OCR：框与墨迹接近 → 取并集，兼顾降部与抗锯齿
+            const x0 = Math.min(it.x, ink.x);
+            const y0 = Math.min(it.y, ink.y);
+            const x1 = Math.max(it.x + it.w, ink.x + ink.w);
+            const y1 = Math.max(it.y + it.h, ink.y + ink.h);
+            refBox = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+          }
+        }
+
+        const padX = Math.max(3, Math.round(refBox.h * 0.25));
+        const padY = Math.max(3, Math.round(refBox.h * 0.3));
 
         // 夹在邻居允许的范围内：宁可少擦一点，也绝不能压到旁边的文字。
         const coverFor = function (l, dx) {
           const textL = dx;
           const textR = dx + Math.max(0, l.widest);
-          let cx = Math.max(Math.min(it.x - padX, textL - padX), lim.left);
-          let cy = Math.max(Math.min(it.y, l.y) - padY, lim.top);
-          let cx1 = Math.min(Math.max(it.x + it.w + padX, textR + padX), lim.right);
-          let cy1 = Math.min(Math.max(it.y + it.h, l.y + l.blockH) + padY, lim.bottom);
+          let cx = Math.max(Math.min(refBox.x - padX, textL - padX), lim.left);
+          let cy = Math.max(Math.min(refBox.y, l.y) - padY, lim.top);
+          let cx1 = Math.min(Math.max(refBox.x + refBox.w + padX, textR + padX), lim.right);
+          let cy1 = Math.min(Math.max(refBox.y + refBox.h, l.y + l.blockH) + padY, lim.bottom);
           if (cx1 <= cx) cx1 = Math.min(cx + 1, lim.right);
           if (cy1 <= cy) cy1 = Math.min(cy + 1, lim.bottom);
           return { x: cx, y: cy, w: cx1 - cx, h: cy1 - cy };
@@ -1364,9 +1375,11 @@
         }
         if (!coverOk) {
           paintBackground(ctx, cover, bg);
-        } else if (opts.forceCoverFill || (opts.preferItemFontHeight !== false && it.fontHeight > 0)) {
-          // PDF 文字层：框是精确的，ink 模式可能留下红字/彩底残影。
-          // 再整框填一次底色，保证英文被盖干净（底色采样已限制在浅色/均匀环上）。
+        } else if (opts.forceCoverFill && !isVisionItem && (it.fontHeight > 0 || (ink && ink.inkDensity > 0.02))) {
+          // PDF / 本地 OCR：框可靠，整框填底色，避免英文残影
+          paintBackground(ctx, cover, bg);
+        } else if (isVisionItem && ink && ink.inkDensity > 0.02 && ink.lineHeight > 5) {
+          // 视觉路径：只填「墨迹框」范围，绝不用模型给的大框去刷角色/色块
           paintBackground(ctx, cover, bg);
         }
 

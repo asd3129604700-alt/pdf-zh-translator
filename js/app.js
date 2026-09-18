@@ -1129,6 +1129,8 @@
           y: it.y,
           w: it.w,
           h: it.h,
+          // 视觉框没有可靠字号；overlay 会按墨迹估，避免用大框当字号
+          fontHeight: 0,
           src: it.src,
           dst: ctx.recognizeOnly ? "" : it.dst,
           engine: it.source === "whole" ? "vision-whole" : "vision-region",
