@@ -1715,6 +1715,64 @@ console.log("\n[8] 去字：文字掩膜 + 无缝修复");
       ok("合并：中间隔着一整段空白（表格列）→ 不并", r.items.length === 2 && r.merged === 0);
     }
 
+    // ---------- 「不切分」模式：同上那一对，去掉间距上限就该并 ----------
+    {
+      const items = [
+        { x: 20, y: 30, w: 40, h: 12, src: "MATERIAL", dst: "材质" },
+        { x: 200, y: 30, w: 40, h: 12, src: "SIZE", dst: "尺寸" },
+      ];
+      const r = UM.mergeAdjacentItems(items, { gapRatio: Infinity });
+      ok(
+        "不切分：同一行隔得再远也并成一条（这是「不切分」与「智能合并」的唯一区别）",
+        r.items.length === 1 && r.items[0].src === "MATERIAL SIZE" && r.items[0].dst === "材质尺寸",
+        "剩 " + r.items.length + " 条：" + r.items.map(function (it) { return it.src; }).join(" | ")
+      );
+    }
+
+    // 「不切分」也不能把"重复识别"粘成「材质材质」
+    {
+      const items = [
+        { x: 20, y: 30, w: 60, h: 12, src: "MATERIAL", dst: "材质" },
+        { x: 24, y: 30, w: 58, h: 12, src: "MATERIAL", dst: "材质" },
+      ];
+      const r = UM.mergeAdjacentItems(items, { gapRatio: Infinity, minGapRatio: -0.35 });
+      ok(
+        "不切分：重叠的重复条仍然不并（否则会变成「材质材质」）",
+        r.items.length === 2 && r.merged === 0,
+        "剩 " + r.items.length + " 条"
+      );
+    }
+
+    // 「不切分」仍然不跨行、不并高度差过大的
+    {
+      const items = [
+        { x: 20, y: 30, w: 40, h: 12, src: "A", dst: "甲" },
+        { x: 200, y: 30, w: 40, h: 12, src: "B", dst: "乙" },
+        { x: 22, y: 46, w: 40, h: 12, src: "C", dst: "丙" },
+        { x: 20, y: 30, w: 30, h: 30, src: "BIG", dst: "大" },
+      ];
+      const r = UM.mergeAdjacentItems(items, { gapRatio: Infinity });
+      const srcs = r.items.map(function (it) { return it.src; }).join(" | ");
+      const sameRow = r.items.some(function (it) {
+        return it.src === "A B";
+      });
+      ok("不切分：同一行的并了", sameRow, srcs);
+      ok(
+        "不切分：下一行的没被并进来",
+        r.items.some(function (it) {
+          return it.src === "C";
+        }),
+        srcs
+      );
+      ok(
+        "不切分：高度差过大的（大标题）没被并进来",
+        r.items.some(function (it) {
+          return it.src === "BIG";
+        }),
+        srcs
+      );
+    }
+
     // 上下两行 → 不并（只做同一行）
     {
       const items = [

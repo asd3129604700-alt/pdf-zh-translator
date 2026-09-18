@@ -102,6 +102,17 @@
             </select>
           </label>
           <label class="field">
+            <span>
+              文字块切分
+              <span class="muted tiny">模型 / 本地 OCR 都生效</span>
+            </span>
+            <select id="opt-split-mode">
+              <option value="smart" selected>智能合并（默认）</option>
+              <option value="whole">不切分（同一行合成一条）</option>
+              <option value="off">保持原样（不合并，排查用）</option>
+            </select>
+          </label>
+          <label class="field">
             <span>中文字号</span>
             <select id="opt-font-grow">
               <option value="1">跟随原文</option>
